@@ -19,6 +19,7 @@ import math
 import random
 import json
 import uuid
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -389,7 +390,7 @@ class ConsciousnessEmulator:
                 self._clamp(0.75 * memory_coherence + 0.25 * normalized_stability),
                 {
                     "memory_coherence": memory_coherence,
-                    "state_continuity": 1.0 - normalized_stability,
+                    "state_settledness": 1.0 - normalized_stability,
                 },
             ),
             BrainRegionState(
@@ -404,7 +405,7 @@ class ConsciousnessEmulator:
                 {
                     "entropy": normalized_entropy,
                     "memory_coherence": memory_coherence,
-                    "state_continuity": 1.0 - normalized_stability,
+                    "state_settledness": 1.0 - normalized_stability,
                 },
             ),
             BrainRegionState(
@@ -526,6 +527,7 @@ class ConsciousnessMemoryStore:
     generated agents can reuse or compress the stored traces.
     """
 
+    COMPRESSED_MEMORY_LIMIT = 32  # Keep the compressed summary small and cheap to reload.
     FILE_MAP = {
         "thoughts": "thoughts.jsonl",
         "memories": "memories.jsonl",
@@ -633,8 +635,8 @@ class ConsciousnessMemoryStore:
             "session_id": self.session_id,
             "memory_count": len(memories),
             "unique_memory_count": len(normalized),
-            "compressed_memories": normalized[:32],
-            "updated_at": datetime.now().astimezone().isoformat(),
+            "compressed_memories": normalized[: self.COMPRESSED_MEMORY_LIMIT],
+            "updated_at": self._simulation_time()["event_time"],
         }
         summary_path = self.session_dir / "compressed_memories.json"
         summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -651,7 +653,6 @@ class ConsciousnessBackedLLM:
         "remember",
         "memory",
         "yesterday",
-        "today",
         "before",
         "past",
         "present",
@@ -662,11 +663,17 @@ class ConsciousnessBackedLLM:
         "angry",
         "afraid",
         "excited",
-        "calm",
         "joy",
         "fear",
         "love",
     )
+    MEMORY_PATTERNS = tuple(
+        re.compile(r"\b" + re.escape(term) + r"\b") for term in MEMORY_HINTS
+    )
+    EMOTION_PATTERNS = tuple(
+        re.compile(r"\b" + re.escape(term) + r"\b") for term in EMOTION_HINTS
+    )
+    BYTE_NORMALIZATION_FACTOR = 127.5  # 255 / 2 maps bytes into roughly [-1, 1].
 
     def __init__(
         self,
@@ -680,8 +687,11 @@ class ConsciousnessBackedLLM:
 
     @staticmethod
     def _text_to_vector(text: str, dim: int = 80) -> List[float]:
-        raw = text.encode("utf-8") or b"\x00"
-        return [((raw[i % len(raw)] / 127.5) - 1.0) for i in range(dim)]
+        raw = text.encode("utf-8") if text else b"\x00"
+        return [
+            ((raw[i % len(raw)] / ConsciousnessBackedLLM.BYTE_NORMALIZATION_FACTOR) - 1.0)
+            for i in range(dim)
+        ]
 
     def _recent_memory_vector(self) -> List[float]:
         memories = self.memory_store.list_records("memories")
@@ -691,23 +701,19 @@ class ConsciousnessBackedLLM:
         return self._text_to_vector(joined, dim=self.emulator.input_dim)
 
     @staticmethod
-    def _contains_any(text: str, terms: tuple) -> bool:
+    def _contains_any(text: str, patterns: tuple) -> bool:
         lowered = text.lower()
-        return any(term in lowered for term in terms)
+        return any(pattern.search(lowered) for pattern in patterns)
 
     def _detect_and_store_input(self, text: str) -> None:
         metadata = {"source": "input", "llm_id": self.llm_id}
         self.memory_store.record_thought(text, metadata)
-        if self._contains_any(text, self.MEMORY_HINTS):
+        if self._contains_any(text, self.MEMORY_PATTERNS):
             self.memory_store.record_memory(text, metadata)
-        if self._contains_any(text, self.EMOTION_HINTS):
+        if self._contains_any(text, self.EMOTION_PATTERNS):
             self.memory_store.record_emotion(text, metadata)
 
-    def _store_consciousness_outputs(
-        self,
-        report: Dict[str, Any],
-        response: str,
-    ) -> None:
+    def _store_consciousness_trace(self, report: Dict[str, Any]) -> None:
         self.memory_store.record_thought(
             report.get("narrative", ""),
             {
@@ -716,15 +722,6 @@ class ConsciousnessBackedLLM:
                 "mode": report["self_model"]["mode"],
             },
         )
-        self.memory_store.record_thought(
-            response,
-            {
-                "source": "generation",
-                "dominant_region": report["self_model"]["dominant_region"],
-                "mode": report["self_model"]["mode"],
-            },
-        )
-
         if report.get("memory_trace"):
             latest_memory = report["memory_trace"][-1]
             self.memory_store.record_memory(
@@ -743,6 +740,16 @@ class ConsciousnessBackedLLM:
                 {"source": "consciousness", "activation": limbic["activation"]},
             )
 
+    def _store_generated_response(self, report: Dict[str, Any], response: str) -> None:
+        self.memory_store.record_thought(
+            response,
+            {
+                "source": "generation",
+                "dominant_region": report["self_model"]["dominant_region"],
+                "mode": report["self_model"]["mode"],
+            },
+        )
+
     def respond(
         self,
         prompt: str,
@@ -760,7 +767,7 @@ class ConsciousnessBackedLLM:
             prediction_error=prediction_error,
             sensory_context={"prompt_length": float(len(prompt)) / 100.0},
         )
-
+        self._store_consciousness_trace(report)
         compressed = self.memory_store.compress_memories()
         response = (
             f"[{self.llm_id[:8]}] {report['self_model']['mode']} focus on "
@@ -768,8 +775,7 @@ class ConsciousnessBackedLLM:
             f"Recovered {compressed['unique_memory_count']} compressed memories. "
             f"{report['narrative']}"
         )
-        self._store_consciousness_outputs(report, response)
-        compressed = self.memory_store.compress_memories()
+        self._store_generated_response(report, response)
 
         return {
             "llm_id": self.llm_id,

@@ -475,11 +475,14 @@ def test_consciousness_backed_llm_compresses_memories_for_future_sessions():
     with tempfile.TemporaryDirectory() as tmpdir:
         llm = ConsciousnessBackedLLM(base_dir=tmpdir, session_id="session_b")
         llm.respond("I remember the past and present.", goal="archive")
+        # Repeating the same memory recall should not increase the compressed
+        # unique-memory count even though total memory_count grows.
         result = llm.respond("I remember the past and present.", goal="archive")
 
         compressed_path = os.path.join(tmpdir, "session_b", "compressed_memories.json")
         assert os.path.exists(compressed_path)
-        compressed = json.loads(open(compressed_path, encoding="utf-8").read())
+        with open(compressed_path, encoding="utf-8") as handle:
+            compressed = json.loads(handle.read())
         assert compressed["memory_count"] >= 2
         assert compressed["unique_memory_count"] <= compressed["memory_count"]
         assert result["compressed_memories"]["unique_memory_count"] == compressed["unique_memory_count"]
