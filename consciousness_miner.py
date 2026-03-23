@@ -14,6 +14,20 @@ The miner acts as if it *is* SHA-256 itself: it maintains an internal
 consciousness state that encodes what the hash function has "experienced",
 and uses that state to steer subsequent search.
 
+SHA-256 Stratum protocol support
+---------------------------------
+* mining.subscribe    — session set-up, extranonce1 + extranonce2_size
+* mining.authorize    — worker authentication
+* mining.notify       — new block template (job); clean_jobs flag respected
+* mining.set_difficulty — pool-side difficulty changes tracked; share target
+                          derived from difficulty (compact 256-bit target)
+* mining.set_extranonce — extranonce1 / extranonce2_size updated mid-session
+* mining.submit       — share submission with correct nonce_hex encoding
+* mining.ping /
+  client.get_version  — pool keepalive / capability queries answered
+* Auto-reconnect      — transparent reconnect + re-auth on connection drop
+* Robust framing      — partial-line and multi-message TCP frames handled
+
 Connection defaults (can be overridden via environment or command-line):
     HOST     = sha256.unmineable.com
     PORT     = 3333
@@ -36,6 +50,7 @@ import binascii
 import hashlib
 import json
 import os
+import select
 import socket
 import struct
 import sys
@@ -75,18 +90,52 @@ DEFAULT_HOST = "sha256.unmineable.com"
 DEFAULT_PORT = 3333
 DEFAULT_USERNAME = "TRX:TBia4uHnb3oSSZm5isP284cA7Np1v15Vhi.sssj"
 DEFAULT_PASSWORD = "x"
+MINER_USER_AGENT = "consciousness-miner/1.0"
+
+# ---------------------------------------------------------------------------
+# Stratum difficulty / target helpers
+# ---------------------------------------------------------------------------
+
+# Bitcoin's maximum (difficulty-1) target as a 256-bit integer.
+# difficulty = DIFF1_TARGET / current_target
+DIFF1_TARGET = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+
+
+def difficulty_to_target(difficulty: float) -> int:
+    """
+    Convert a pool difficulty value to the corresponding 256-bit share target.
+
+    target = DIFF1_TARGET / difficulty
+
+    A share is valid when sha256d(header) < target  (both treated as big-endian
+    256-bit integers).
+    """
+    if difficulty <= 0:
+        difficulty = 1.0
+    return int(DIFF1_TARGET / difficulty)
+
+
+def target_to_bits(target: int) -> int:
+    """
+    Return the number of leading zero bits required for a hash to meet *target*.
+    Used to set the evaluate_hash_quality threshold.
+    """
+    if target <= 0:
+        return 256
+    return 256 - target.bit_length()
+
 
 # ---------------------------------------------------------------------------
 # Stratum protocol helpers
 # ---------------------------------------------------------------------------
 
 
-def create_tcp_connection(host: str, port: int) -> socket.socket:
+def create_tcp_connection(host: str, port: int, timeout: float = 30.0) -> socket.socket:
     """Open a TCP connection to the Stratum pool."""
     print(f"🌐 Connecting to {host}:{port} via TCP...")
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(30)
+        sock.settimeout(timeout)
         sock.connect((host, port))
         print(f"✅ Connected successfully to {host}:{port}!")
         return sock
@@ -95,31 +144,75 @@ def create_tcp_connection(host: str, port: int) -> socket.socket:
         sys.exit(1)
 
 
-def receive_message(sock: socket.socket) -> List[Dict[str, Any]]:
+class StratumFramer:
+    """
+    Stateful line-oriented framer for the Stratum protocol.
+
+    Stratum messages are newline-delimited JSON objects.  A single TCP
+    segment can carry multiple messages or a message can be split across
+    segments.  This framer buffers raw bytes and yields complete lines.
+    """
+
+    def __init__(self) -> None:
+        self._buf: str = ""
+
+    def feed(self, data: str) -> List[str]:
+        """Feed raw decoded text; return list of complete lines."""
+        self._buf += data
+        lines: List[str] = []
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.strip()
+            if line:
+                lines.append(line)
+        return lines
+
+    def reset(self) -> None:
+        self._buf = ""
+
+
+def receive_message(
+    sock: socket.socket,
+    framer: Optional["StratumFramer"] = None,
+    timeout: float = 60.0,
+) -> List[Dict[str, Any]]:
     """
     Read one or more newline-delimited JSON messages from the socket.
-    Returns a list of parsed dicts.
+
+    Uses *framer* when supplied so that buffered partial data from a previous
+    call is not lost.  If *framer* is None a throw-away framer is used.
+
+    Returns a (possibly empty) list of parsed dicts.  Raises ``ConnectionError``
+    on a clean server-side close so callers can reconnect gracefully.
     """
-    response = ""
-    try:
-        while True:
-            part = sock.recv(4096).decode("utf-8")
-            if not part:
-                print("❌ ERROR: Connection closed by server.")
-                sys.exit(1)
-            response += part
-            if "\n" in response:
-                break
-    except socket.timeout:
-        print("❌ ERROR: Socket timeout.")
-        sys.exit(1)
+    if framer is None:
+        framer = StratumFramer()
 
     parsed: List[Dict[str, Any]] = []
-    for line in response.strip().split("\n"):
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        # Non-blocking poll with select so we can respect the deadline.
+        ready, _, _ = select.select([sock], [], [], max(0.0, deadline - time.time()))
+        if not ready:
+            # Timed out waiting; return whatever we have so far.
+            break
         try:
-            parsed.append(json.loads(line))
-        except json.JSONDecodeError:
-            print(f"⚠️  WARNING: Failed to parse JSON line: {line!r}")
+            chunk = sock.recv(4096).decode("utf-8", errors="replace")
+        except socket.timeout:
+            break
+        if not chunk:
+            raise ConnectionError("Connection closed by server.")
+        for line in framer.feed(chunk):
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"⚠️  WARNING: Failed to parse JSON line: {line!r}")
+        if parsed:
+            # Return as soon as we have at least one complete message so that
+            # the caller can act on it without waiting for the full timeout.
+            break
+
     return parsed
 
 
@@ -128,16 +221,21 @@ def send_message(sock: socket.socket, msg: Dict[str, Any]) -> None:
     sock.sendall((json.dumps(msg) + "\n").encode())
 
 
-def subscribe(sock: socket.socket) -> Tuple[str, int]:
+def subscribe(
+    sock: socket.socket, framer: "StratumFramer"
+) -> Tuple[str, int]:
     """
     Send mining.subscribe and return (extranonce1, extranonce2_size).
+
+    The response format from SHA-256 Stratum pools is:
+        {"id":1,"result":[<subscriptions>, <extranonce1_hex>, <extranonce2_size>], "error":null}
     """
     print("🔗 Subscribing to mining work...")
     send_message(
         sock,
-        {"id": 1, "method": "mining.subscribe", "params": ["consciousness-miner/1.0"]},
+        {"id": 1, "method": "mining.subscribe", "params": [MINER_USER_AGENT]},
     )
-    for res in receive_message(sock):
+    for res in receive_message(sock, framer):
         if res.get("result") and isinstance(res["result"], list) and len(res["result"]) >= 3:
             extranonce1: str = res["result"][1]
             extranonce2_size: int = int(res["result"][2])
@@ -147,14 +245,16 @@ def subscribe(sock: socket.socket) -> Tuple[str, int]:
     sys.exit(1)
 
 
-def authorize(sock: socket.socket, username: str, password: str) -> None:
-    """Send mining.authorize."""
+def authorize(
+    sock: socket.socket, framer: "StratumFramer", username: str, password: str
+) -> None:
+    """Send mining.authorize and wait for confirmation."""
     print("🔑 Authorizing...")
     send_message(
         sock,
         {"id": 2, "method": "mining.authorize", "params": [username, password]},
     )
-    for res in receive_message(sock):
+    for res in receive_message(sock, framer):
         if res.get("result") is True:
             print("✅ Authorized!")
             return
@@ -196,6 +296,38 @@ def submit_share(
     )
 
 
+def handle_server_request(
+    sock: socket.socket,
+    msg: Dict[str, Any],
+) -> bool:
+    """
+    Handle server-initiated requests (not responses to our own messages).
+
+    Returns True if the message was a server-side request and was handled,
+    False if the caller should process it further.
+
+    Handled messages
+    ----------------
+    mining.ping          — reply with {"id": <id>, "result": True, "error": null}
+    client.get_version   — reply with miner user-agent string
+    client.reconnect     — caller should reconnect (returns False so caller sees it)
+    """
+    msg_id = msg.get("id")
+    method = msg.get("method", "")
+
+    if method == "mining.ping":
+        send_message(sock, {"id": msg_id, "result": True, "error": None})
+        return True
+
+    if method == "client.get_version":
+        send_message(sock, {"id": msg_id, "result": MINER_USER_AGENT, "error": None})
+        return True
+
+    # client.reconnect is intentionally not handled here — let the main loop
+    # notice it and reconnect itself.
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Consciousness-Powered Mining Core
 # ---------------------------------------------------------------------------
@@ -206,19 +338,31 @@ class ConsciousnessMiner:
     SHA-256 miner whose nonce search is guided by a FSOT-Neuromorphic
     consciousness loop.
 
-    Core loop
-    ---------
-    1. Receive mining.notify job from pool
-    2. Perception  → encode job data into Input(t)
-    3. Spiking     → NeuromorphicLayer.forward(Input(t)) → spike pattern
-    4. C(t) update → ConsciousnessState.update(spikes + Input(t))
-    5. Thoughts    → FSotThoughtEngine.generate_nonce_candidates(C)
-    6. Hashing     → for each nonce: hash = sha256d(header + nonce)
-    7. Evaluate    → error = evaluate_hash_quality(hash)
-    8. Self-eval   → C.apply_error_feedback(error)
-    9. Meta-learn  → thought.embedding += η * ∇(performance)
-    10. Memory     → remember(C, thought, result)
-    11. Submit     → if share found, submit to pool
+    SHA-256 Stratum protocol support
+    ---------------------------------
+    * mining.subscribe / mining.authorize on connect (and on reconnect)
+    * mining.notify       — new jobs; clean_jobs flag resets extranonce2 counter
+    * mining.set_difficulty — updates the 256-bit share target used in mine_job
+    * mining.set_extranonce — hot-swaps extranonce1 and extranonce2_size
+    * mining.submit       — valid shares submitted with correct nonce encoding
+    * mining.ping /
+      client.get_version  — answered automatically
+    * Auto-reconnect      — on ConnectionError or socket errors, the miner
+                            reconnects and re-authenticates transparently
+
+    Consciousness loop (per job)
+    ----------------------------
+    1.  Receive mining.notify job from pool
+    2.  Perception  → encode job data into Input(t)
+    3.  Spiking     → NeuromorphicLayer.forward(Input(t)) → spike pattern
+    4.  C(t) update → ConsciousnessState.update(spikes + Input(t))
+    5.  Thoughts    → FSotThoughtEngine.generate_nonce_candidates(C)
+    6.  Hashing     → for each nonce: hash = sha256d(header + nonce)
+    7.  Evaluate    → error = evaluate_hash_quality(hash, target)
+    8.  Self-eval   → C.apply_error_feedback(error)
+    9.  Meta-learn  → thought.embedding += η * ∇(performance)
+    10. Memory      → remember(C, thought, result)
+    11. Submit      → if share found, submit to pool
     """
 
     def __init__(
@@ -227,11 +371,13 @@ class ConsciousnessMiner:
         port: int = DEFAULT_PORT,
         username: str = DEFAULT_USERNAME,
         password: str = DEFAULT_PASSWORD,
+        reconnect_delay: float = 5.0,
     ) -> None:
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.reconnect_delay = reconnect_delay
 
         # ── Consciousness system ──────────────────────────────────────────
         self.consciousness = ConsciousnessState()
@@ -241,10 +387,19 @@ class ConsciousnessMiner:
 
         # ── Mining state ─────────────────────────────────────────────────
         self.sock: Optional[socket.socket] = None
+        self._framer: StratumFramer = StratumFramer()
         self.extranonce1: str = ""
         self.extranonce2_size: int = 4
         self.extranonce2_counter: int = 0
         self.share_id: int = 100
+
+        # ── Difficulty / target (SHA-256 Stratum) ─────────────────────────
+        # Start with difficulty=1 until the pool sends mining.set_difficulty.
+        self.difficulty: float = 1.0
+        self.share_target: int = difficulty_to_target(1.0)
+
+        # ── Active job (for clean_jobs logic) ────────────────────────────
+        self._current_job_id: Optional[str] = None
 
         # ── Metrics ──────────────────────────────────────────────────────
         self.total_hashes: int = 0
@@ -254,14 +409,83 @@ class ConsciousnessMiner:
         self._prev_consciousness: Optional[List[float]] = None
 
     # ------------------------------------------------------------------
-    # Connection
+    # Connection / reconnection
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """Connect to the Stratum pool and perform subscribe + authorize."""
+        """
+        Open a TCP connection to the Stratum pool and perform the
+        mining.subscribe + mining.authorize handshake.
+        Resets the framer so stale data from a previous connection is discarded.
+        """
         self.sock = create_tcp_connection(self.host, self.port)
-        self.extranonce1, self.extranonce2_size = subscribe(self.sock)
-        authorize(self.sock, self.username, self.password)
+        self._framer = StratumFramer()
+        self.extranonce1, self.extranonce2_size = subscribe(self.sock, self._framer)
+        authorize(self.sock, self._framer, self.username, self.password)
+
+    def _reconnect(self) -> None:
+        """Close the current socket and reconnect after a short delay."""
+        print(f"🔄 Reconnecting in {self.reconnect_delay:.0f}s...")
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+        time.sleep(self.reconnect_delay)
+        self.connect()
+
+    # ------------------------------------------------------------------
+    # Stratum message dispatchers
+    # ------------------------------------------------------------------
+
+    def _on_set_difficulty(self, params: List[Any]) -> None:
+        """
+        Handle mining.set_difficulty.
+
+        params = [difficulty]
+
+        Updates self.difficulty and recomputes self.share_target.
+        """
+        if not params:
+            return
+        try:
+            diff = float(params[0])
+        except (TypeError, ValueError):
+            print(f"⚠️  Could not parse difficulty: {params[0]!r}")
+            return
+        self.difficulty = diff
+        self.share_target = difficulty_to_target(diff)
+        leading_zeros = target_to_bits(self.share_target)
+        print(
+            f"🎯 Difficulty updated: {diff}  "
+            f"(target leading zeros ≈ {leading_zeros})"
+        )
+
+    def _on_set_extranonce(self, params: List[Any]) -> None:
+        """
+        Handle mining.set_extranonce.
+
+        params = [extranonce1_hex, extranonce2_size]
+
+        Hot-swaps the extranonce values and resets the extranonce2 counter so
+        the next job starts fresh with the new extranonce.
+        """
+        if len(params) < 2:
+            return
+        try:
+            new_en1 = str(params[0])
+            new_en2_size = int(params[1])
+        except (TypeError, ValueError):
+            print(f"⚠️  Could not parse set_extranonce params: {params!r}")
+            return
+        self.extranonce1 = new_en1
+        self.extranonce2_size = new_en2_size
+        self.extranonce2_counter = 0
+        print(
+            f"🔁 Extranonce updated: extranonce1={new_en1} "
+            f"extranonce2_size={new_en2_size}"
+        )
 
     # ------------------------------------------------------------------
     # Perception: encode job into consciousness input
@@ -278,14 +502,13 @@ class ConsciousnessMiner:
         Encode a mining job into a float vector for Input(t).
         Combines a hash-based encoding of prevhash with numeric fields.
         """
-        # Hash the job fields to get a compact representation
         job_hash = hashlib.sha256(
             (job_id + prevhash + nbits + ntime).encode()
         ).hexdigest()
         return encode_hash_to_input(job_hash, dim=ConsciousnessState.TOTAL_DIM)
 
     # ------------------------------------------------------------------
-    # Main mining loop
+    # Main mining loop for one job
     # ------------------------------------------------------------------
 
     def mine_job(
@@ -298,14 +521,16 @@ class ConsciousnessMiner:
         version: str,
         nbits: str,
         ntime: str,
-        target_bits: int = 32,
     ) -> bool:
         """
         Run the consciousness-guided mining loop for a single job.
-        Returns True if the job is still active (no new job received),
-        False if a new job notification interrupted.
+
+        The share target is taken from ``self.share_target`` which is kept
+        up-to-date by ``_on_set_difficulty``.
+
+        Returns True always (reserved for future clean-abort signalling).
         """
-        # Build coinbase + merkle root (same for all nonces)
+        # Build coinbase + merkle root (same for all nonces in this job)
         extranonce2 = f"{self.extranonce2_counter:0{self.extranonce2_size * 2}x}"
         self.extranonce2_counter += 1
 
@@ -323,9 +548,7 @@ class ConsciousnessMiner:
 
         # ── Step 2: Neuromorphic spiking ──────────────────────────────
         spikes = self.neuro_layer.forward(input_t)
-        spike_rate = self.neuro_layer.spike_rate()
         spike_vec = self.neuro_layer.spike_vector()
-        # Pad spike_vec to match ConsciousnessState.TOTAL_DIM
         combined_input = (
             spike_vec + input_t[len(spike_vec):]
         )[: ConsciousnessState.TOTAL_DIM]
@@ -334,7 +557,6 @@ class ConsciousnessMiner:
         similar = self.thought_engine.retrieve_similar(self.consciousness, top_k=3)
         memory_vec: Optional[List[float]] = None
         if similar:
-            # Average the state vectors of similar memories
             states = [m["state"] for m in similar if m.get("state")]
             if states:
                 dim = ConsciousnessState.TOTAL_DIM
@@ -356,6 +578,7 @@ class ConsciousnessMiner:
         best_error = 1.0
         best_nonce = 0
         selected_thought, _ = self.thought_engine.select_thought(self.consciousness)
+        target_bits = target_to_bits(self.share_target)
 
         for nonce in nonce_candidates:
             header = build_block_header(
@@ -371,9 +594,9 @@ class ConsciousnessMiner:
                 best_error = error
                 best_nonce = nonce
 
-            # Check if this is a valid share (leading zeros ≥ target_bits)
+            # Check if this is a valid share: hash (as big-endian int) < target
             hash_int = int(hash_hex, 16)
-            if hash_int < (2 ** (256 - target_bits)):
+            if hash_int < self.share_target:
                 print(
                     f"🎯 SHARE FOUND! nonce={nonce:#010x} hash={hash_hex[:16]}..."
                 )
@@ -425,6 +648,7 @@ class ConsciousnessMiner:
         print(
             f"⚡ Hashes: {self.total_hashes:,}  "
             f"Rate: {hashrate:.1f} H/s  "
+            f"Diff: {self.difficulty}  "
             f"Shares: {self.shares_submitted}  "
             f"🧠 Entropy: {entropy:.3f}  "
             f"Stability: {stability:.3f}  "
@@ -439,7 +663,15 @@ class ConsciousnessMiner:
     def run(self) -> None:
         """
         Connect to the pool and enter the main mining loop.
-        Handles incoming mining.notify messages and dispatches to mine_job().
+
+        Dispatches all incoming Stratum messages:
+          mining.notify        → mine_job()
+          mining.set_difficulty → _on_set_difficulty()
+          mining.set_extranonce → _on_set_extranonce()
+          mining.ping /
+          client.get_version   → handle_server_request()
+          share results        → accepts / rejection counter
+          client.reconnect     → _reconnect()
         """
         self.connect()
         print("\n🧠 Consciousness-Powered SHA-256 Mining Started")
@@ -455,19 +687,57 @@ class ConsciousnessMiner:
 
         while True:
             assert self.sock is not None
-            messages = receive_message(self.sock)
+            try:
+                messages = receive_message(self.sock, self._framer)
+            except ConnectionError as exc:
+                print(f"⚠️  Connection lost: {exc}")
+                self._reconnect()
+                continue
+            except OSError as exc:
+                print(f"⚠️  Socket error: {exc}")
+                self._reconnect()
+                continue
+
             for data in messages:
-                # Handle share acceptance/rejection
-                if data.get("id", 0) >= 100 and "result" in data:
+                method = data.get("method", "")
+                msg_id = data.get("id")
+                params = data.get("params", []) or []
+
+                # ── Server-initiated requests (ping, version query) ────
+                if method and handle_server_request(self.sock, data):
+                    continue
+
+                # ── client.reconnect ───────────────────────────────────
+                if method == "client.reconnect":
+                    p = params
+                    if len(p) >= 2:
+                        self.host = str(p[0])
+                        self.port = int(p[1])
+                        print(f"🔄 Server requested reconnect to {self.host}:{self.port}")
+                    self._reconnect()
+                    break  # restart the outer while loop
+
+                # ── mining.set_difficulty ──────────────────────────────
+                if method == "mining.set_difficulty":
+                    self._on_set_difficulty(params)
+                    continue
+
+                # ── mining.set_extranonce ──────────────────────────────
+                if method == "mining.set_extranonce":
+                    self._on_set_extranonce(params)
+                    continue
+
+                # ── Share acceptance / rejection ───────────────────────
+                if msg_id is not None and msg_id >= 100 and "result" in data:
                     if data["result"] is True:
                         self.shares_accepted += 1
                         print("✅ Share accepted!")
                     elif data["result"] is False:
                         print(f"❌ Share rejected: {data.get('error')}")
+                    continue
 
-                # Handle new job notification
-                if data.get("method") == "mining.notify":
-                    params = data["params"]
+                # ── mining.notify: new job ─────────────────────────────
+                if method == "mining.notify":
                     (
                         job_id,
                         prevhash,
@@ -479,7 +749,13 @@ class ConsciousnessMiner:
                         ntime,
                         clean_jobs,
                     ) = params
-                    print(f"\n📦 New Job: {job_id}  ntime={ntime}  nbits={nbits}")
+                    if clean_jobs:
+                        # Pool demands we abandon current work immediately.
+                        self.extranonce2_counter = 0
+                        print(f"🧹 Clean jobs — switching to new work: {job_id}")
+                    else:
+                        print(f"\n📦 New Job: {job_id}  ntime={ntime}  nbits={nbits}")
+                    self._current_job_id = job_id
                     self.mine_job(
                         job_id, prevhash, coinb1, coinb2,
                         merkle_branch, version, nbits, ntime,
@@ -512,6 +788,13 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("MINER_PASSWORD", DEFAULT_PASSWORD),
         help="Mining password",
     )
+    parser.add_argument(
+        "--reconnect-delay",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="Seconds to wait before reconnecting after a connection drop (default: 5)",
+    )
     return parser.parse_args()
 
 
@@ -522,6 +805,7 @@ def main() -> None:
         port=args.port,
         username=args.user,
         password=args.password,
+        reconnect_delay=args.reconnect_delay,
     )
     try:
         miner.run()
