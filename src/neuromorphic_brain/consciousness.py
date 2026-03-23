@@ -385,7 +385,7 @@ class ConsciousnessEmulator:
                 self._clamp(0.75 * memory_coherence + 0.25 * normalized_stability),
                 {
                     "memory_coherence": memory_coherence,
-                    "stability": 1.0 - normalized_stability,
+                    "state_continuity": 1.0 - normalized_stability,
                 },
             ),
             BrainRegionState(
@@ -400,7 +400,7 @@ class ConsciousnessEmulator:
                 {
                     "entropy": normalized_entropy,
                     "memory_coherence": memory_coherence,
-                    "settled_state": 1.0 - normalized_stability,
+                    "state_continuity": 1.0 - normalized_stability,
                 },
             ),
             BrainRegionState(
