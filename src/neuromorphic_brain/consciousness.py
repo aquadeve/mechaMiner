@@ -673,7 +673,7 @@ class ConsciousnessBackedLLM:
     EMOTION_PATTERNS = tuple(
         re.compile(r"\b" + re.escape(term) + r"\b") for term in EMOTION_HINTS
     )
-    BYTE_NORMALIZATION_FACTOR = 127.5  # 255 / 2 maps bytes into roughly [-1, 1].
+    BYTE_NORMALIZATION_FACTOR = 127.5  # 255 / 2, then subtract 1.0 to map bytes into exactly [-1, 1].
 
     def __init__(
         self,

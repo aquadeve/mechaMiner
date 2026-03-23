@@ -395,7 +395,7 @@ class FSOT2NeuromorphicIntegration:
                 llm_result = self.external_llm.generate(
                     request,
                     goal=(context or {}).get('goal') or (context or {}).get('learning_goal'),
-                    context={'neural_activity': neural_activity, **(context or {})},
+                    context={**(context or {}), 'neural_activity': neural_activity},
                 )
                 fsot_responses['external_llm'] = llm_result['response']
                 fsot_responses['external_llm_metadata'] = {

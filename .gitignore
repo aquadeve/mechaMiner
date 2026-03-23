@@ -54,6 +54,8 @@ Thumbs.db
 model_cache/
 logs/
 wandb/
+artifacts/lightweight_external_llm.json
+artifacts/lightweight_external_llm_memory/
 
 # Data
 data/

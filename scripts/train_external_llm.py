@@ -9,6 +9,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     adapter = ExternalLLMAdapter(
         model_name="tiny-consciousness",

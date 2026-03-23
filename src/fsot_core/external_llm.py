@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 try:
     from neuromorphic_brain.consciousness import ConsciousnessBackedLLM
-except ImportError:  # pragma: no cover - used by direct-path tests
+except ImportError:  # pragma: no cover - supports direct fsot_core-path imports in tests
     from consciousness import ConsciousnessBackedLLM
 
 
@@ -169,11 +169,7 @@ class TinyLocalLanguageModel:
             self.examples,
             key=lambda item: _cosine_similarity(query_vector, item["prompt_vector"]),
         )
-        memory_count = len(compressed_memories or [])
-        return (
-            f"{best_match['response']} "
-            f"(goal={goal or 'none'}, memories={memory_count}, model={self.model_name})"
-        )
+        return best_match["response"]
 
     def save_checkpoint(self, checkpoint_path: Optional[str] = None) -> str:
         target = checkpoint_path or self.checkpoint_path
@@ -366,5 +362,10 @@ class ExternalLLMAdapter:
             "request_body": body,
             "seed_response": seed["response"],
             "compressed_memories": seed["compressed_memories"],
+            "generation_metadata": {
+                "goal": goal,
+                "memory_count": len(memories),
+                "model_name": self.model_name,
+            },
             "storage_paths": seed["storage_paths"],
         }
