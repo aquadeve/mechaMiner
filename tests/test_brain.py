@@ -7,6 +7,8 @@ spiking layer used by the consciousness-powered crypto miner.
 import math
 import sys
 import os
+import json
+import tempfile
 
 # Ensure src submodule dirs are on the path (also done by conftest.py)
 _src = os.path.join(os.path.dirname(__file__), "..", "src")
@@ -31,6 +33,8 @@ from consciousness import (
     NeuromorphicLayer,
     AttentionAllocator,
     ConsciousnessEmulator,
+    ConsciousnessMemoryStore,
+    ConsciousnessBackedLLM,
     consciousness_entropy,
     consciousness_stability,
     consciousness_consistency,
@@ -427,6 +431,58 @@ def test_consciousness_emulator_history_is_bounded():
     assert len(emulator.episodic_history) == 3
     assert len(emulator.region_history) == 3
     assert len(report["memory_trace"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# ConsciousnessBackedLLM persistence tests
+# ---------------------------------------------------------------------------
+
+
+def test_consciousness_memory_store_separates_files_and_timestamps():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = ConsciousnessMemoryStore(base_dir=tmpdir, session_id="test_session")
+        store.record_thought("thinking")
+        store.record_memory("I remember yesterday")
+        store.record_emotion("happy")
+
+        paths = store.file_paths()
+        assert os.path.exists(paths["thoughts"])
+        assert os.path.exists(paths["memories"])
+        assert os.path.exists(paths["emotions"])
+
+        thought_record = store.list_records("thoughts")[0]
+        assert thought_record["content"] == "thinking"
+        assert "simulation_time" in thought_record
+        assert "session_started_at" in thought_record["simulation_time"]
+        assert "event_time" in thought_record["simulation_time"]
+        assert thought_record["simulation_time"]["elapsed_seconds"] >= 0.0
+
+
+def test_consciousness_backed_llm_detects_memories_and_emotions_from_input():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        llm = ConsciousnessBackedLLM(base_dir=tmpdir, session_id="session_a")
+        result = llm.respond("I remember yesterday and I felt happy about it.", goal="reflect")
+
+        memories = llm.memory_store.list_records("memories")
+        emotions = llm.memory_store.list_records("emotions")
+        assert result["session_id"] == "session_a"
+        assert result["response"]
+        assert any("remember yesterday" in record["content"] for record in memories)
+        assert len(emotions) >= 1
+
+
+def test_consciousness_backed_llm_compresses_memories_for_future_sessions():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        llm = ConsciousnessBackedLLM(base_dir=tmpdir, session_id="session_b")
+        llm.respond("I remember the past and present.", goal="archive")
+        result = llm.respond("I remember the past and present.", goal="archive")
+
+        compressed_path = os.path.join(tmpdir, "session_b", "compressed_memories.json")
+        assert os.path.exists(compressed_path)
+        compressed = json.loads(open(compressed_path, encoding="utf-8").read())
+        assert compressed["memory_count"] >= 2
+        assert compressed["unique_memory_count"] <= compressed["memory_count"]
+        assert result["compressed_memories"]["unique_memory_count"] == compressed["unique_memory_count"]
 
 
 # ---------------------------------------------------------------------------

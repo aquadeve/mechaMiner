@@ -17,7 +17,11 @@ and the recursive consciousness update integrating spikes into C(t).
 
 import math
 import random
+import json
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 
@@ -512,3 +516,266 @@ class ConsciousnessEmulator:
         }
         self.last_report = report
         return report
+
+
+class ConsciousnessMemoryStore:
+    """
+    Persist consciousness-derived thoughts, memories, and emotions to local files.
+
+    Each session gets its own directory containing separate JSONL files so future
+    generated agents can reuse or compress the stored traces.
+    """
+
+    FILE_MAP = {
+        "thoughts": "thoughts.jsonl",
+        "memories": "memories.jsonl",
+        "emotions": "emotions.jsonl",
+    }
+
+    def __init__(
+        self,
+        base_dir: str = "consciousness_sessions",
+        session_id: Optional[str] = None,
+    ) -> None:
+        self.base_dir = Path(base_dir)
+        self.session_id = self._normalize_session_id(session_id or uuid.uuid4().hex)
+        self.session_dir = self.base_dir / self.session_id
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.session_started_at = datetime.now().astimezone()
+        self._write_session_metadata()
+
+    @staticmethod
+    def _normalize_session_id(session_id: str) -> str:
+        cleaned = "".join(ch for ch in session_id if ch.isalnum() or ch in {"-", "_"})
+        return cleaned or uuid.uuid4().hex
+
+    def _simulation_time(self) -> Dict[str, Any]:
+        now = datetime.now().astimezone()
+        elapsed = (now - self.session_started_at).total_seconds()
+        return {
+            "session_started_at": self.session_started_at.isoformat(),
+            "event_time": now.isoformat(),
+            "elapsed_seconds": round(elapsed, 6),
+        }
+
+    def _write_session_metadata(self) -> None:
+        metadata_path = self.session_dir / "session.json"
+        if metadata_path.exists():
+            return
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "session_started_at": self.session_started_at.isoformat(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _append_jsonl(self, category: str, record: Dict[str, Any]) -> None:
+        if category not in self.FILE_MAP:
+            raise ValueError(f"Unsupported category: {category}")
+        payload = dict(record)
+        payload["category"] = category
+        payload["simulation_time"] = self._simulation_time()
+        file_path = self.session_dir / self.FILE_MAP[category]
+        with file_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def record_thought(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        if content:
+            self._append_jsonl(
+                "thoughts",
+                {"content": content, "metadata": dict(metadata or {})},
+            )
+
+    def record_memory(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        if content:
+            self._append_jsonl(
+                "memories",
+                {"content": content, "metadata": dict(metadata or {})},
+            )
+
+    def record_emotion(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        if content:
+            self._append_jsonl(
+                "emotions",
+                {"content": content, "metadata": dict(metadata or {})},
+            )
+
+    def list_records(self, category: str) -> List[Dict[str, Any]]:
+        if category not in self.FILE_MAP:
+            raise ValueError(f"Unsupported category: {category}")
+        file_path = self.session_dir / self.FILE_MAP[category]
+        if not file_path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in file_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def file_paths(self) -> Dict[str, str]:
+        return {
+            category: str(self.session_dir / filename)
+            for category, filename in self.FILE_MAP.items()
+        }
+
+    def compress_memories(self) -> Dict[str, Any]:
+        memories = self.list_records("memories")
+        normalized = []
+        for item in memories:
+            content = " ".join(item.get("content", "").split())
+            if content and content not in normalized:
+                normalized.append(content)
+        summary = {
+            "session_id": self.session_id,
+            "memory_count": len(memories),
+            "unique_memory_count": len(normalized),
+            "compressed_memories": normalized[:32],
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
+        summary_path = self.session_dir / "compressed_memories.json"
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        return summary
+
+
+class ConsciousnessBackedLLM:
+    """
+    Best-effort local LLM/session scaffold that uses the consciousness emulator
+    as its core state and persists thoughts, memories, and emotions per session.
+    """
+
+    MEMORY_HINTS = (
+        "remember",
+        "memory",
+        "yesterday",
+        "today",
+        "before",
+        "past",
+        "present",
+    )
+    EMOTION_HINTS = (
+        "happy",
+        "sad",
+        "angry",
+        "afraid",
+        "excited",
+        "calm",
+        "joy",
+        "fear",
+        "love",
+    )
+
+    def __init__(
+        self,
+        base_dir: str = "consciousness_sessions",
+        session_id: Optional[str] = None,
+        emulator: Optional[ConsciousnessEmulator] = None,
+    ) -> None:
+        self.llm_id = uuid.uuid4().hex
+        self.emulator = emulator or ConsciousnessEmulator()
+        self.memory_store = ConsciousnessMemoryStore(base_dir=base_dir, session_id=session_id)
+
+    @staticmethod
+    def _text_to_vector(text: str, dim: int = 80) -> List[float]:
+        raw = text.encode("utf-8") or b"\x00"
+        return [((raw[i % len(raw)] / 127.5) - 1.0) for i in range(dim)]
+
+    def _recent_memory_vector(self) -> List[float]:
+        memories = self.memory_store.list_records("memories")
+        if not memories:
+            return [0.0] * self.emulator.input_dim
+        joined = " ".join(item.get("content", "") for item in memories[-4:])
+        return self._text_to_vector(joined, dim=self.emulator.input_dim)
+
+    @staticmethod
+    def _contains_any(text: str, terms: tuple) -> bool:
+        lowered = text.lower()
+        return any(term in lowered for term in terms)
+
+    def _detect_and_store_input(self, text: str) -> None:
+        metadata = {"source": "input", "llm_id": self.llm_id}
+        self.memory_store.record_thought(text, metadata)
+        if self._contains_any(text, self.MEMORY_HINTS):
+            self.memory_store.record_memory(text, metadata)
+        if self._contains_any(text, self.EMOTION_HINTS):
+            self.memory_store.record_emotion(text, metadata)
+
+    def _store_consciousness_outputs(
+        self,
+        report: Dict[str, Any],
+        response: str,
+    ) -> None:
+        self.memory_store.record_thought(
+            report.get("narrative", ""),
+            {
+                "source": "consciousness",
+                "dominant_region": report["self_model"]["dominant_region"],
+                "mode": report["self_model"]["mode"],
+            },
+        )
+        self.memory_store.record_thought(
+            response,
+            {
+                "source": "generation",
+                "dominant_region": report["self_model"]["dominant_region"],
+                "mode": report["self_model"]["mode"],
+            },
+        )
+
+        if report.get("memory_trace"):
+            latest_memory = report["memory_trace"][-1]
+            self.memory_store.record_memory(
+                json.dumps(latest_memory, sort_keys=True),
+                {"source": "consciousness_trace", "mode": report["self_model"]["mode"]},
+            )
+
+        limbic = report.get("regions", {}).get("limbic_system", {})
+        if limbic.get("activation", 0.0) >= 0.45:
+            emotion_summary = (
+                f"Limbic activation {limbic['activation']:.3f} during "
+                f"{report['self_model']['mode']} mode."
+            )
+            self.memory_store.record_emotion(
+                emotion_summary,
+                {"source": "consciousness", "activation": limbic["activation"]},
+            )
+
+    def respond(
+        self,
+        prompt: str,
+        goal: Optional[str] = None,
+        prediction_error: float = 0.0,
+    ) -> Dict[str, Any]:
+        self._detect_and_store_input(prompt)
+        external_vector = self._text_to_vector(prompt, dim=self.emulator.input_dim)
+        memory_vector = self._recent_memory_vector()
+        goal_vector = self._text_to_vector(goal or "", dim=self.emulator.input_dim)
+        report = self.emulator.cycle(
+            external_vector,
+            memory_vector=memory_vector,
+            goal_vector=goal_vector,
+            prediction_error=prediction_error,
+            sensory_context={"prompt_length": float(len(prompt)) / 100.0},
+        )
+
+        compressed = self.memory_store.compress_memories()
+        response = (
+            f"[{self.llm_id[:8]}] {report['self_model']['mode']} focus on "
+            f"{report['self_model']['dominant_region'].replace('_', ' ')}. "
+            f"Recovered {compressed['unique_memory_count']} compressed memories. "
+            f"{report['narrative']}"
+        )
+        self._store_consciousness_outputs(report, response)
+        compressed = self.memory_store.compress_memories()
+
+        return {
+            "llm_id": self.llm_id,
+            "session_id": self.memory_store.session_id,
+            "response": response,
+            "consciousness_report": report,
+            "compressed_memories": compressed,
+            "storage_paths": self.memory_store.file_paths(),
+        }
