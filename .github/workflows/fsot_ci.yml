@@ -9,6 +9,9 @@ on:
     # Run daily at 2 AM UTC
     - cron: '0 2 * * *'
 
+permissions:
+  contents: read
+
 jobs:
   fsot-compliance-test:
     runs-on: ubuntu-latest
@@ -80,6 +83,38 @@ jobs:
       run: |
         echo "## Performance Results" >> $GITHUB_STEP_SUMMARY
         python -c "import json; data=json.load(open('performance_results.json')); print('Speedup Factor: ' + str(data['average_speedup']) + 'x'); print('Memory Efficiency: ' + str(data['memory_efficiency']) + 'x'); print('Test Success Rate: ' + str(data['success_rate']*100) + '%')" >> $GITHUB_STEP_SUMMARY
+
+  lightweight-external-llm-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Train lightweight external LLM
+      run: |
+        python scripts/train_external_llm.py --output artifacts/lightweight_external_llm.json
+
+    - name: Run lightweight external LLM tests
+      run: |
+        python -m pytest tests/test_external_llm.py -v --tb=short
+
+    - name: Upload lightweight LLM artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: lightweight-external-llm
+        path: |
+          artifacts/lightweight_external_llm.json
+          artifacts/lightweight_external_llm_memory
 
   documentation-test:
     runs-on: ubuntu-latest
