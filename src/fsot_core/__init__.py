@@ -45,6 +45,15 @@ except ImportError:
     print("⚠️  Advanced AI Assistant not found")
     AdvancedAIAssistant = None
 
+try:
+    from .external_llm import ExternalLLMAdapter
+except ImportError:
+    try:
+        from external_llm import ExternalLLMAdapter
+    except ImportError:
+        print("⚠️  Lightweight External LLM adapter not found")
+        ExternalLLMAdapter = None
+
 class FSOT2NeuromorphicIntegration:
     """
     Complete integration layer between FSOT 2.0 and Neuromorphic Brain System
@@ -57,6 +66,7 @@ class FSOT2NeuromorphicIntegration:
         self.fsot_core = None
         self.learning_system = None
         self.ai_assistant = None
+        self.external_llm = None
         
         # Setup logging
         logging.basicConfig(
@@ -106,7 +116,17 @@ class FSOT2NeuromorphicIntegration:
                 "autonomous_learning": True,
                 "advanced_ai_assistant": True,
                 "consciousness_driven_decisions": True,
-                "neural_memory_integration": True
+                "neural_memory_integration": True,
+                "external_llm": True
+            },
+            "external_llm": {
+                "enabled": True,
+                "provider": "auto",
+                "endpoint": os.environ.get("MECHAMINER_LLM_ENDPOINT"),
+                "api_key_env": "MECHAMINER_LLM_API_KEY",
+                "model_name": os.environ.get("MECHAMINER_LLM_MODEL", "tiny-consciousness"),
+                "checkpoint_path": "artifacts/lightweight_external_llm.json",
+                "memory_base_dir": "consciousness_sessions",
             },
             "processing_priorities": {
                 "emergency_override": True,
@@ -167,7 +187,23 @@ class FSOT2NeuromorphicIntegration:
             if AdvancedAIAssistant:
                 self.ai_assistant = AdvancedAIAssistant()
                 self.logger.info("✅ Advanced AI Assistant initialized")
-                
+
+            external_config = self.config.get("external_llm", {})
+            if (
+                ExternalLLMAdapter
+                and external_config.get("enabled", True)
+                and self.config.get("fsot_integration", {}).get("external_llm", True)
+            ):
+                self.external_llm = ExternalLLMAdapter(
+                    model_name=external_config.get("model_name", "tiny-consciousness"),
+                    endpoint=external_config.get("endpoint"),
+                    provider=external_config.get("provider", "auto"),
+                    api_key=os.environ.get(external_config.get("api_key_env", "MECHAMINER_LLM_API_KEY")),
+                    local_model_path=external_config.get("checkpoint_path"),
+                    memory_base_dir=external_config.get("memory_base_dir", "consciousness_sessions"),
+                )
+                self.logger.info("✅ Lightweight external LLM initialized")
+                 
         except Exception as e:
             self.logger.warning(f"⚠️  Some FSOT components failed to initialize: {e}")
 
@@ -207,6 +243,7 @@ class FSOT2NeuromorphicIntegration:
             'fsot_core_status': 'OPERATIONAL' if self.fsot_core else 'UNAVAILABLE',
             'learning_system_status': 'OPERATIONAL' if self.learning_system else 'UNAVAILABLE',
             'ai_assistant_status': 'OPERATIONAL' if self.ai_assistant else 'UNAVAILABLE',
+            'external_llm_status': 'OPERATIONAL' if self.external_llm else 'UNAVAILABLE',
             'neural_bridges_count': len(self.neural_bridges),
             'consciousness_level': self.brain_system.consciousness_level if self.brain_system else 0.0,
             'integration_capabilities': self._assess_capabilities()
@@ -218,6 +255,7 @@ class FSOT2NeuromorphicIntegration:
             'neuromorphic_processing': self.brain_system is not None,
             'autonomous_learning': self.learning_system is not None,
             'advanced_ai_assistance': self.ai_assistant is not None,
+            'external_llm_integration': self.external_llm is not None,
             'consciousness_tracking': self.brain_system is not None,
             'emotional_intelligence': self.brain_system is not None,
             'cross_modal_integration': True,
@@ -350,7 +388,24 @@ class FSOT2NeuromorphicIntegration:
                 fsot_responses['ai_assistant'] = assistant_response
             except Exception as e:
                 fsot_responses['ai_assistant'] = f"Error: {e}"
-        
+
+        # Process through lightweight external LLM bridge
+        if self.external_llm:
+            try:
+                llm_result = self.external_llm.generate(
+                    request,
+                    goal=(context or {}).get('goal') or (context or {}).get('learning_goal'),
+                    context={'neural_activity': neural_activity, **(context or {})},
+                )
+                fsot_responses['external_llm'] = llm_result['response']
+                fsot_responses['external_llm_metadata'] = {
+                    'provider': llm_result['provider_used'],
+                    'session_id': llm_result['session_id'],
+                    'storage_paths': llm_result['storage_paths'],
+                }
+            except Exception as e:
+                fsot_responses['external_llm'] = f"Error: {e}"
+         
         return fsot_responses
 
     async def _neural_fsot_integration(self, processing_results: Dict) -> str:
@@ -426,7 +481,8 @@ class FSOT2NeuromorphicIntegration:
             'fsot_components': {
                 'fsot_core': self.integration_state.get('fsot_core_status', 'UNAVAILABLE'),
                 'learning_system': self.integration_state.get('learning_system_status', 'UNAVAILABLE'),
-                'ai_assistant': self.integration_state.get('ai_assistant_status', 'UNAVAILABLE')
+                'ai_assistant': self.integration_state.get('ai_assistant_status', 'UNAVAILABLE'),
+                'external_llm': self.integration_state.get('external_llm_status', 'UNAVAILABLE'),
             },
             'integration_capabilities': self.integration_state.get('integration_capabilities', {}),
             'neural_fsot_mapping': self.neural_bridges,

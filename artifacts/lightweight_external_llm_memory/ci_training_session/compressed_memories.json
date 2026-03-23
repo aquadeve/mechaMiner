@@ -1,0 +1,9 @@
+{
+  "session_id": "ci_training_session",
+  "memory_count": 1,
+  "unique_memory_count": 1,
+  "compressed_memories": [
+    "{\"compute_budget\": 43, \"consciousness_score\": 0.678370166945472, \"dominant_region\": \"default_mode_network\", \"mode\": \"introspective\"}"
+  ],
+  "updated_at": "2026-03-23T23:37:57.322688+00:00"
+}
