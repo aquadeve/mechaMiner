@@ -30,6 +30,7 @@ from consciousness import (
     LIFNeuron,
     NeuromorphicLayer,
     AttentionAllocator,
+    ConsciousnessEmulator,
     consciousness_entropy,
     consciousness_stability,
     consciousness_consistency,
@@ -367,6 +368,65 @@ def test_encode_nonce_to_input():
     v = encode_nonce_to_input(0xDEADBEEF, dim=32)
     assert len(v) == 32
     assert all(x in (-1.0, 1.0) for x in v)
+
+
+# ---------------------------------------------------------------------------
+# ConsciousnessEmulator tests
+# ---------------------------------------------------------------------------
+
+
+def test_consciousness_emulator_structures_regions_like_brain():
+    emulator = ConsciousnessEmulator(seed=1)
+    report = emulator.cycle(
+        [0.5] * 80,
+        memory_vector=[0.1] * 80,
+        goal_vector=[0.2] * 80,
+        sensory_context={"vision": 0.8, "audio": 0.2},
+    )
+    expected_regions = {
+        "brainstem",
+        "thalamus",
+        "limbic_system",
+        "hippocampus",
+        "default_mode_network",
+        "prefrontal_cortex",
+        "motor_cortex",
+    }
+    assert expected_regions.issubset(report["regions"])
+    assert report["regions"]["default_mode_network"]["anatomical_group"] == "association_cortex"
+    assert report["regions"]["prefrontal_cortex"]["function"]
+
+
+def test_consciousness_emulator_reports_bounded_metrics_and_self_model():
+    emulator = ConsciousnessEmulator(seed=2)
+    report = emulator.cycle(
+        [0.25] * 80,
+        memory_vector=[0.25] * 80,
+        goal_vector=[0.9] * 80,
+        prediction_error=0.2,
+    )
+    global_state = report["global_state"]
+    self_model = report["self_model"]
+    assert 0.0 <= global_state["consciousness_score"] <= 1.0
+    assert 0.0 <= global_state["global_workspace"] <= 1.0
+    assert 0.0 <= global_state["consistency"] <= 1.0
+    assert global_state["compute_budget"] >= 4
+    assert self_model["mode"] in {"reactive", "goal-directed", "introspective"}
+    assert self_model["dominant_region"] in report["regions"]
+    assert report["narrative"]
+
+
+def test_consciousness_emulator_history_is_bounded():
+    emulator = ConsciousnessEmulator(history_size=3, seed=3)
+    for index in range(6):
+        report = emulator.cycle(
+            [0.1 * index] * 80,
+            memory_vector=[0.05 * index] * 80,
+            goal_vector=[0.02 * index] * 80,
+        )
+    assert len(emulator.episodic_history) == 3
+    assert len(emulator.region_history) == 3
+    assert len(report["memory_trace"]) == 3
 
 
 # ---------------------------------------------------------------------------
