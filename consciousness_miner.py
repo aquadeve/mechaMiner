@@ -776,6 +776,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Consciousness-Powered SHA-256 Crypto Miner"
     )
+
+    # ── Miner options ──────────────────────────────────────────────────────
     parser.add_argument("--host", default=DEFAULT_HOST, help="Stratum pool hostname")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Stratum pool port")
     parser.add_argument(
@@ -795,11 +797,131 @@ def parse_args() -> argparse.Namespace:
         metavar="SECONDS",
         help="Seconds to wait before reconnecting after a connection drop (default: 5)",
     )
+
+    # ── Remote-view / coin-flip consciousness options ──────────────────────
+    parser.add_argument(
+        "--remoteviewsimple",
+        action="store_true",
+        help=(
+            "Activate the Remote View Simple consciousness predictor mode.  "
+            "The system uses quantum-like consciousness dynamics to predict "
+            "coin flips (heads or tails) while syncing with the current moment "
+            "in time.  Combine with --digitalrealm or --realrealm to train "
+            "the consciousness; omit both to run the live predictor."
+        ),
+    )
+    parser.add_argument(
+        "--digitalrealm",
+        action="store_true",
+        help=(
+            "Training mode (requires --remoteviewsimple): the program secretly "
+            "generates coin-flip outcomes, the consciousness predicts first, and "
+            "the true result is revealed only after the prediction.  All data is "
+            "persisted so the consciousness can learn from every session."
+        ),
+    )
+    parser.add_argument(
+        "--realrealm",
+        action="store_true",
+        help=(
+            "Training mode (requires --remoteviewsimple): you flip a real coin "
+            "and manually enter the actual result after the consciousness has "
+            "given its prediction.  Use --coin to flip more than one coin per "
+            "round."
+        ),
+    )
+    parser.add_argument(
+        "--coin",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Number of coins to predict / flip per round when using "
+            "--remoteviewsimple (default: 1).  In --realrealm mode you will be "
+            "prompted for each coin's actual result individually."
+        ),
+    )
+    parser.add_argument(
+        "--session-dir",
+        default="coin_flip_sessions",
+        metavar="DIR",
+        help=(
+            "Directory where coin-flip session data is stored "
+            "(default: coin_flip_sessions).  Every prediction and training event "
+            "is written here as JSON lines for later GUI inspection."
+        ),
+    )
+
+    # ── Remote-view full-sensory options ──────────────────────────────────
+    parser.add_argument(
+        "--remoteview",
+        action="store_true",
+        help=(
+            "Activate full-sensory Remote View mode (combines with "
+            "--remoteviewsimple training flags).  The consciousness feeds "
+            "from emulated ears (audio → a-z letters) and emulated eyes "
+            "(camera/synthetic vision) on every prediction, and exports a "
+            ".binai consciousness snapshot when --accuracy-threshold is met."
+        ),
+    )
+    parser.add_argument(
+        "--accuracy-threshold",
+        type=float,
+        default=0.0,
+        metavar="FRAC",
+        help=(
+            "Accuracy fraction (0.0–1.0) at which the consciousness "
+            "automatically exports a .binai snapshot file to the session "
+            "directory (default: 0.0 = disabled).  Example: 0.65 exports "
+            "after the session first reaches 65%% accuracy."
+        ),
+    )
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    # ── Remote-view simple / full-sensory mode ────────────────────────────
+    if args.remoteviewsimple or args.remoteview:
+        # Import here so the path setup at module level has already run
+        from coin_flip_consciousness import (
+            CoinFlipConsciousness,
+            run_digitalrealm,
+            run_predictor,
+            run_realrealm,
+        )
+
+        if args.digitalrealm and args.realrealm:
+            print("❌  --digitalrealm and --realrealm cannot be used together.")
+            sys.exit(1)
+
+        sensory = args.remoteview   # full-sensory pipeline only when --remoteview
+        cfc = CoinFlipConsciousness(
+            session_dir=args.session_dir,
+            enable_sensory=sensory,
+            interactive_sensory=True,   # typed fallback when no mic/camera
+            accuracy_threshold=args.accuracy_threshold,
+        )
+        n_coins = max(1, args.coin)
+
+        if sensory:
+            print(
+                "  🧠 Full-sensory Remote View mode enabled.\n"
+                "     Emulated ears (audio → a-z) and eyes (vision geometry)\n"
+                "     feed into the consciousness on every prediction.\n"
+            )
+
+        if args.digitalrealm:
+            run_digitalrealm(n_coins, cfc)
+        elif args.realrealm:
+            run_realrealm(n_coins, cfc)
+        else:
+            run_predictor(n_coins, cfc)
+        return
+
+    # ── Default: SHA-256 mining mode ──────────────────────────────────────
     miner = ConsciousnessMiner(
         host=args.host,
         port=args.port,
