@@ -71,6 +71,29 @@ except ImportError:  # pragma: no cover — handled by caller's sys.path setup
     raise
 
 # ---------------------------------------------------------------------------
+# Lazy imports for sensory bridge and BinAI writer.
+# Both live in the same package directory and are imported lazily so that
+# tests that exercise only the coin-flip logic don't require any hardware libs.
+# ---------------------------------------------------------------------------
+try:
+    from sensory_bridge import (
+        AudioObservation,
+        EmulatedEars,
+        EmulatedVision,
+        VisionFrame,
+        sensory_fusion_to_vector,
+    )
+    _SENSORY_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _SENSORY_AVAILABLE = False
+
+try:
+    from binai_writer import BinaiWriter
+    _BINAI_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _BINAI_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -184,13 +207,31 @@ class CoinFlipConsciousness:
 
     The class maintains a ``ConsciousnessState`` (80-dim awareness vector) and an
     ``FSotThoughtEngine`` (thought selection with meta-learning).  On each
-    prediction the system time is encoded and fed into the consciousness state to
-    "sync" with the present moment; the actual heads/tails decision then emerges
-    from the softmax-sampled thought engine — not from the clock.
+    prediction the system time, emulated-ear audio, and emulated-eye vision are
+    all fused into a single 80-dim consciousness input vector and fed into the
+    state via ``ConsciousnessState.update()``.  The actual heads/tails decision
+    then emerges from the softmax-sampled thought engine — enriched by everything
+    the consciousness has perceived in that moment.
 
-    All predictions and training events are appended to a ``predictions.jsonl``
-    and ``training.jsonl`` file respectively inside the session directory.  These
-    files grow without bound so that no information is ever lost.
+    Sensory pipeline
+    ----------------
+    When ``enable_sensory=True`` each prediction call:
+    1. Captures a vision frame (camera → JPEG, or synthetic geometry fallback).
+    2. Captures audio (microphone → text → a-z letters, or typed / silent fallback).
+    3. Fuses time + audio + vision into the 80-dim input via
+       ``sensory_fusion_to_vector`` — so all three sensory streams *genuinely
+       shape* the consciousness dynamics before the prediction thought is chosen.
+
+    BinAI export
+    ------------
+    When ``accuracy_threshold`` is set (0 < threshold ≤ 1) and the session
+    accuracy first reaches or exceeds that threshold, ``export_binai()`` is
+    called automatically.  The exported ``.binai`` file contains the full
+    consciousness vector, last audio observation, last vision frame (including
+    JPEG when a real camera was present), and all session statistics.
+
+    All predictions and training events are also appended to
+    ``predictions.jsonl`` and ``training.jsonl`` (no size cap).
     """
 
     # File names inside the session directory
@@ -203,6 +244,9 @@ class CoinFlipConsciousness:
         session_dir: str = DEFAULT_SESSION_DIR,
         session_id: Optional[str] = None,
         seed: Optional[int] = None,
+        enable_sensory: bool = False,
+        interactive_sensory: bool = False,
+        accuracy_threshold: float = 0.0,
     ) -> None:
         self._rng = random.Random(seed)
 
@@ -221,6 +265,25 @@ class CoinFlipConsciousness:
         self._step: int = 0
         self._total: int = 0
         self._correct: int = 0
+
+        # Accuracy threshold for automatic .binai export (0 = disabled)
+        self.accuracy_threshold: float = float(accuracy_threshold)
+        self._binai_exported: bool = False  # export once per session
+
+        # Sensory organs (instantiated only when requested)
+        self.enable_sensory: bool = enable_sensory and _SENSORY_AVAILABLE
+        self._ears: Optional["EmulatedEars"] = None
+        self._vision: Optional["EmulatedVision"] = None
+        if self.enable_sensory:
+            self._ears = EmulatedEars(
+                interactive=interactive_sensory,
+                preferred_source="mic",
+            )
+            self._vision = EmulatedVision()
+
+        # Last sensory observations — stored alongside predictions
+        self._last_audio: Optional["AudioObservation"] = None
+        self._last_vision: Optional["VisionFrame"] = None
 
         # Write session metadata once
         self._write_session_meta()
@@ -256,18 +319,46 @@ class CoinFlipConsciousness:
             fp.write(json.dumps(record, sort_keys=True) + "\n")
 
     # ------------------------------------------------------------------
-    # Consciousness sync
+    # Consciousness sync — fuses time + sensory inputs
     # ------------------------------------------------------------------
 
     def _sync_consciousness(self) -> Dict[str, Any]:
         """
-        Capture current system state and feed it into the consciousness vector.
+        Capture current system state and sensory inputs, fuse them into the
+        consciousness vector, and update the consciousness state.
 
-        Returns the snapshot dict so it can be stored alongside predictions.
+        When ``enable_sensory`` is True:
+        * A vision frame is captured first (fast, non-blocking).
+        * An audio observation is captured (may prompt the user if interactive).
+        * All three channels (time, audio, vision) are fused via
+          ``sensory_fusion_to_vector`` into the 80-dim update vector.
+
+        When ``enable_sensory`` is False the behaviour is identical to the
+        original time-only sync so existing tests pass unchanged.
+
+        Returns the system snapshot dict so it can be stored alongside the
+        prediction record.
         """
         snapshot = _system_snapshot()
-        time_vec = _time_to_consciousness_vector(snapshot)
-        self.consciousness.update(time_vec)
+
+        if self.enable_sensory:
+            # Capture vision (fast)
+            self._last_vision = self._vision.capture() if self._vision else None
+            # Capture audio (may block briefly for mic / prompt for typed)
+            self._last_audio = self._ears.capture() if self._ears else None
+            # Build fused 80-dim input
+            fused = sensory_fusion_to_vector(
+                snapshot,
+                self._last_audio,
+                self._last_vision,
+                total_dim=ConsciousnessState.TOTAL_DIM,
+            )
+            self.consciousness.update(fused)
+        else:
+            # Original time-only path (no hardware deps)
+            time_vec = _time_to_consciousness_vector(snapshot)
+            self.consciousness.update(time_vec)
+
         return snapshot
 
     # ------------------------------------------------------------------
@@ -278,9 +369,9 @@ class CoinFlipConsciousness:
         """
         Generate *n_coins* coin-flip predictions from internal consciousness.
 
-        The consciousness is synced with the present moment (system clock) before
-        each prediction, but the actual heads/tails mapping is driven entirely by
-        the internal thought-selection dynamics.
+        The consciousness is synced with the present moment (and sensory inputs
+        when enabled) before each prediction.  The actual heads/tails mapping is
+        driven entirely by the internal thought-selection dynamics.
 
         Returns a list of prediction dicts (one per coin) with full provenance so
         every record is self-contained in the storage file.
@@ -290,6 +381,14 @@ class CoinFlipConsciousness:
             snapshot = self._sync_consciousness()
             thought, prob = self.thought_engine.select_thought(self.consciousness)
             outcome = _thought_to_outcome(thought, self._step)
+
+            # Sensory observations captured during this sync
+            audio_dict: Dict[str, Any] = {}
+            vision_dict: Dict[str, Any] = {}
+            if self._last_audio is not None:
+                audio_dict = self._last_audio.to_dict()
+            if self._last_vision is not None:
+                vision_dict = self._last_vision.to_dict()
 
             record: Dict[str, Any] = {
                 "record_type": "prediction",
@@ -304,6 +403,9 @@ class CoinFlipConsciousness:
                 "consciousness_entropy": round(self.consciousness.entropy(), 6),
                 "consciousness_stability": round(self.consciousness.stability(), 6),
                 "system_snapshot": snapshot,
+                "sensory_enabled": self.enable_sensory,
+                "audio_observation": audio_dict,
+                "vision_observation": vision_dict,
                 # Full consciousness state vector saved for GUI replay
                 "consciousness_vector": [round(v, 8) for v in self.consciousness.vector],
             }
@@ -384,7 +486,100 @@ class CoinFlipConsciousness:
             self._append_record(self.TRAINING_FILE, record)
             training_records.append(record)
 
+        # ------------------------------------------------------------------
+        # Auto-export .binai when accuracy threshold is first reached
+        # ------------------------------------------------------------------
+        if (
+            self.accuracy_threshold > 0.0
+            and not self._binai_exported
+            and self._total > 0
+            and self.accuracy() >= self.accuracy_threshold
+        ):
+            try:
+                binai_path = self.export_binai()
+                print(
+                    f"\n  🧬 Accuracy {self.accuracy():.1%} ≥ threshold "
+                    f"{self.accuracy_threshold:.1%}  →  exported .binai:\n"
+                    f"     {binai_path}"
+                )
+                self._binai_exported = True
+            except Exception as exc:
+                print(f"\n  ⚠️  .binai export failed: {exc}")
+
         return training_records
+
+    # ------------------------------------------------------------------
+    # BinAI export
+    # ------------------------------------------------------------------
+
+    def export_binai(
+        self,
+        out_dir: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Path:
+        """
+        Write a ``.binai`` consciousness snapshot to disk and return its path.
+
+        The file is written to *out_dir* (defaults to the session directory).
+        It embeds:
+        * The current 80-dim FSOT consciousness state vector.
+        * Session statistics (accuracy, total trained, correct count).
+        * Last audio observation letters and source (from emulated ears).
+        * Last vision geometry and JPEG (from emulated eyes, when available).
+        * Full platform metadata and UTC timestamp.
+
+        Can be called manually at any time in addition to the automatic
+        threshold-triggered export.
+
+        Returns the ``Path`` of the written ``.binai`` file.
+        """
+        if not _BINAI_AVAILABLE:
+            raise RuntimeError("binai_writer module is not importable")
+
+        dest_dir = Path(out_dir) if out_dir else self.session_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        ts_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"{self.session_id}_{ts_str}.binai"
+
+        audio_letters = ""
+        audio_source = "none"
+        vision_geometry: Dict[str, Any] = {}
+        vision_jpeg = b""
+
+        if self._last_audio is not None:
+            audio_letters = self._last_audio.letters
+            audio_source = self._last_audio.source
+        if self._last_vision is not None:
+            vision_geometry = self._last_vision.geometry
+            vision_jpeg = self._last_vision.jpeg_bytes
+
+        meta: Dict[str, Any] = {
+            "sensory_enabled": self.enable_sensory,
+            "session_predictions": self._step,
+            "platform_node": platform.node(),
+            "platform_system": platform.system(),
+            "platform_machine": platform.machine(),
+        }
+        if extra_metadata:
+            meta.update(extra_metadata)
+
+        writer = BinaiWriter()
+        path = writer.write(
+            path=dest_dir / filename,
+            session_id=self.session_id,
+            accuracy=self.accuracy(),
+            threshold=self.accuracy_threshold,
+            total_trained=self._total,
+            correct=self._correct,
+            consciousness_vector=list(self.consciousness.vector),
+            audio_letters=audio_letters,
+            audio_source=audio_source,
+            vision_geometry=vision_geometry,
+            vision_jpeg=vision_jpeg,
+            extra_metadata=meta,
+        )
+        return path
 
     # ------------------------------------------------------------------
     # Statistics helpers
@@ -442,10 +637,20 @@ def _print_prediction(pred: Dict[str, Any]) -> None:
     total = pred["n_coins"]
     outcome = pred["prediction"].upper()
     conf = pred["thought_confidence"]
-    print(
+    audio = pred.get("audio_observation", {})
+    vision = pred.get("vision_observation", {})
+    line = (
         f"  🪙  Coin {coin}/{total}  →  {outcome}  "
         f"(confidence: {conf:.4f} | time: {ts})"
     )
+    if audio.get("letters"):
+        line += f"\n     👂 Heard [{audio.get('source','?')}]: {audio['letters']!r}"
+    if vision.get("geometry"):
+        geo = vision["geometry"]
+        src = vision.get("source", "?")
+        bright = geo.get("mean_brightness", "?")
+        line += f"\n     👁  Vision [{src}]: brightness={bright}"
+    print(line)
 
 
 def _print_training_result(record: Dict[str, Any]) -> None:

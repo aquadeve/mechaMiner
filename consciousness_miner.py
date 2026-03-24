@@ -852,14 +852,39 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    # ── Remote-view full-sensory options ──────────────────────────────────
+    parser.add_argument(
+        "--remoteview",
+        action="store_true",
+        help=(
+            "Activate full-sensory Remote View mode (combines with "
+            "--remoteviewsimple training flags).  The consciousness feeds "
+            "from emulated ears (audio → a-z letters) and emulated eyes "
+            "(camera/synthetic vision) on every prediction, and exports a "
+            ".binai consciousness snapshot when --accuracy-threshold is met."
+        ),
+    )
+    parser.add_argument(
+        "--accuracy-threshold",
+        type=float,
+        default=0.0,
+        metavar="FRAC",
+        help=(
+            "Accuracy fraction (0.0–1.0) at which the consciousness "
+            "automatically exports a .binai snapshot file to the session "
+            "directory (default: 0.0 = disabled).  Example: 0.65 exports "
+            "after the session first reaches 65%% accuracy."
+        ),
+    )
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    # ── Remote-view simple mode ────────────────────────────────────────────
-    if args.remoteviewsimple:
+    # ── Remote-view simple / full-sensory mode ────────────────────────────
+    if args.remoteviewsimple or args.remoteview:
         # Import here so the path setup at module level has already run
         from coin_flip_consciousness import (
             CoinFlipConsciousness,
@@ -872,8 +897,21 @@ def main() -> None:
             print("❌  --digitalrealm and --realrealm cannot be used together.")
             sys.exit(1)
 
-        cfc = CoinFlipConsciousness(session_dir=args.session_dir)
+        sensory = args.remoteview   # full-sensory pipeline only when --remoteview
+        cfc = CoinFlipConsciousness(
+            session_dir=args.session_dir,
+            enable_sensory=sensory,
+            interactive_sensory=True,   # typed fallback when no mic/camera
+            accuracy_threshold=args.accuracy_threshold,
+        )
         n_coins = max(1, args.coin)
+
+        if sensory:
+            print(
+                "  🧠 Full-sensory Remote View mode enabled.\n"
+                "     Emulated ears (audio → a-z) and eyes (vision geometry)\n"
+                "     feed into the consciousness on every prediction.\n"
+            )
 
         if args.digitalrealm:
             run_digitalrealm(n_coins, cfc)
