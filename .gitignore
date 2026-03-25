@@ -88,3 +88,6 @@ htmlcov/
 *.jpeg
 *.png
 *.gif
+
+# Coin-flip session data generated at runtime
+coin_flip_sessions/
