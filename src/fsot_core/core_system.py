@@ -293,6 +293,11 @@ class FSotThoughtEngine:
     ) -> Tuple[Thought, float]:
         """
         Sample a thought according to P(thought_i) = softmax(score_i / T).
+
+        When ``thought_bias`` is provided, it maps thought patterns to additive
+        bias scores so memory-guided strategies can reinforce or dampen specific
+        thoughts before sampling.
+
         Returns (selected_thought, probability).
         """
         scores = self.score_thoughts(consciousness)
@@ -436,7 +441,9 @@ class FSotThoughtEngine:
 
         preferred_pattern = ""
         if thought_bias:
-            preferred_pattern = max(thought_bias.items(), key=lambda item: item[1])[0]
+            pattern, score = max(thought_bias.items(), key=lambda item: item[1])
+            if score > 0.0:
+                preferred_pattern = pattern
 
         return {
             "memory_vector": memory_vector,

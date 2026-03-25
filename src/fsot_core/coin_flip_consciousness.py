@@ -501,7 +501,7 @@ class CoinFlipConsciousness:
                 pred.get("consciousness_vector", self.consciousness.vector),
                 Thought(
                     pattern=pattern,
-                    confidence=float(pred.get("thought_confidence", 0.5) or 0.5),
+                    confidence=float(pred.get("thought_confidence", 0.5)),
                     modality="prediction",
                     origin="coin_flip_training",
                 ),

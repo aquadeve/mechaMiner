@@ -323,12 +323,16 @@ def test_train_records_memory_for_future_strategy():
     with tempfile.TemporaryDirectory() as tmpdir:
         cfc = _make_cfc(tmpdir)
         preds = cfc.predict(n_coins=2)
-        actuals = [pred["prediction"] for pred in preds]
+        actuals = [
+            preds[0]["prediction"],
+            {"heads": "tails", "tails": "heads"}[preds[1]["prediction"]],
+        ]
 
         cfc.train(preds, actuals, realm="digital")
 
         assert len(cfc.thought_engine.memory) == 2
-        assert all(item["result"]["correct"] for item in cfc.thought_engine.memory)
+        assert cfc.thought_engine.memory[0]["result"]["correct"] is True
+        assert cfc.thought_engine.memory[1]["result"]["correct"] is False
 
 
 def test_predict_reports_memory_guidance_after_training():
@@ -349,7 +353,7 @@ def test_stats_include_theory_and_memory_samples():
         stats = cfc.stats()
 
         assert stats["memory_samples"] == 0
-        assert "memory" in stats["consciousness_theory"].lower()
+        assert stats["consciousness_theory"] == CONSCIOUSNESS_THEORY
 
 
 def test_train_realm_stored():
