@@ -287,13 +287,20 @@ class FSotThoughtEngine:
         return [_dot(c_proj, t.embedding) for t in self.thoughts]
 
     def select_thought(
-        self, consciousness: ConsciousnessState
+        self,
+        consciousness: ConsciousnessState,
+        thought_bias: Optional[Dict[str, float]] = None,
     ) -> Tuple[Thought, float]:
         """
         Sample a thought according to P(thought_i) = softmax(score_i / T).
         Returns (selected_thought, probability).
         """
         scores = self.score_thoughts(consciousness)
+        if thought_bias:
+            scores = [
+                score + thought_bias.get(thought.pattern, 0.0)
+                for thought, score in zip(self.thoughts, scores)
+            ]
         probs = _softmax(scores, self.temperature)
         r = random.random()
         cumulative = 0.0
@@ -372,6 +379,73 @@ class FSotThoughtEngine:
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored[:top_k]]
+
+    def memory_guidance(
+        self, consciousness: ConsciousnessState, top_k: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Convert similar past experiences into a memory vector and thought bias.
+
+        Correct past predictions reinforce similar future states and thoughts,
+        while incorrect past predictions dampen repeated mistakes.
+        """
+        similar = self.retrieve_similar(consciousness, top_k=top_k)
+        dim = len(consciousness.vector)
+        if not similar:
+            return {
+                "memory_vector": [0.0] * dim,
+                "thought_bias": {},
+                "sample_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "preferred_pattern": "",
+            }
+
+        memory_vector = [0.0] * dim
+        thought_bias: Dict[str, float] = {}
+        success_count = 0
+        failure_count = 0
+
+        for rank, item in enumerate(similar):
+            state = list(item.get("state", []))
+            action = item.get("action", {})
+            result = item.get("result", {})
+            reward = result.get("reward")
+            if reward is None:
+                reward = 1.0 if result.get("correct") else -1.0
+            reward = max(-1.0, min(1.0, float(reward)))
+            if reward >= 0.0:
+                success_count += 1
+            else:
+                failure_count += 1
+
+            pattern = str(action.get("pattern", ""))
+            confidence = result.get("thought_confidence", action.get("confidence", 0.5))
+            confidence = max(0.1, min(1.0, float(confidence)))
+            recency = 1.0 / float(rank + 1)
+            weight = reward * confidence * recency
+
+            for index, value in enumerate(state[:dim]):
+                memory_vector[index] += value * weight
+            if pattern:
+                thought_bias[pattern] = thought_bias.get(pattern, 0.0) + weight
+
+        peak = max((abs(value) for value in memory_vector), default=0.0)
+        if peak > 0.0:
+            memory_vector = [value / peak for value in memory_vector]
+
+        preferred_pattern = ""
+        if thought_bias:
+            preferred_pattern = max(thought_bias.items(), key=lambda item: item[1])[0]
+
+        return {
+            "memory_vector": memory_vector,
+            "thought_bias": thought_bias,
+            "sample_count": len(similar),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "preferred_pattern": preferred_pattern,
+        }
 
     @property
     def SEGMENT(self) -> int:  # pragma: no cover
