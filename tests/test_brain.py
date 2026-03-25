@@ -226,6 +226,24 @@ def test_thought_engine_memory_bounded():
     assert len(engine.memory) <= 1000
 
 
+def test_thought_engine_memory_guidance_prefers_successful_pattern():
+    engine = FSotThoughtEngine()
+    c = ConsciousnessState()
+    winning = engine.thoughts[0]
+    losing = engine.thoughts[1]
+    engine.remember(c.vector, winning, {"correct": True, "reward": 1.0})
+    engine.remember(c.vector, losing, {"correct": False, "reward": -1.0})
+
+    guidance = engine.memory_guidance(c, top_k=2)
+
+    assert guidance["sample_count"] == 2
+    assert guidance["success_count"] == 1
+    assert guidance["failure_count"] == 1
+    assert guidance["preferred_pattern"] == winning.pattern
+    assert guidance["thought_bias"][winning.pattern] > 0.0
+    assert guidance["thought_bias"][losing.pattern] < 0.0
+
+
 # ---------------------------------------------------------------------------
 # LIF Neuron tests
 # ---------------------------------------------------------------------------

@@ -106,6 +106,12 @@ EMULATOR_HISTORY_SIZE = 100_000
 # Default session storage directory (relative to cwd).
 DEFAULT_SESSION_DIR = "coin_flip_sessions"
 
+CONSCIOUSNESS_THEORY = (
+    "Resonant Memory Guidance: each new prediction blends the present sensory "
+    "moment with similar past predictions, reinforcing thoughts that led to "
+    "correct outcomes and damping thoughts that led to mistakes."
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -284,6 +290,14 @@ class CoinFlipConsciousness:
         # Last sensory observations — stored alongside predictions
         self._last_audio: Optional["AudioObservation"] = None
         self._last_vision: Optional["VisionFrame"] = None
+        self._last_memory_guidance: Dict[str, Any] = {
+            "memory_vector": [0.0] * ConsciousnessState.TOTAL_DIM,
+            "thought_bias": {},
+            "sample_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "preferred_pattern": "",
+        }
 
         # Write session metadata once
         self._write_session_meta()
@@ -353,11 +367,23 @@ class CoinFlipConsciousness:
                 self._last_vision,
                 total_dim=ConsciousnessState.TOTAL_DIM,
             )
-            self.consciousness.update(fused)
+            self._last_memory_guidance = self.thought_engine.memory_guidance(
+                self.consciousness
+            )
+            self.consciousness.update(
+                fused,
+                memory_vector=self._last_memory_guidance["memory_vector"],
+            )
         else:
             # Original time-only path (no hardware deps)
             time_vec = _time_to_consciousness_vector(snapshot)
-            self.consciousness.update(time_vec)
+            self._last_memory_guidance = self.thought_engine.memory_guidance(
+                self.consciousness
+            )
+            self.consciousness.update(
+                time_vec,
+                memory_vector=self._last_memory_guidance["memory_vector"],
+            )
 
         return snapshot
 
@@ -379,7 +405,10 @@ class CoinFlipConsciousness:
         predictions: List[Dict[str, Any]] = []
         for coin_index in range(n_coins):
             snapshot = self._sync_consciousness()
-            thought, prob = self.thought_engine.select_thought(self.consciousness)
+            thought, prob = self.thought_engine.select_thought(
+                self.consciousness,
+                thought_bias=self._last_memory_guidance.get("thought_bias"),
+            )
             outcome = _thought_to_outcome(thought, self._step)
 
             # Sensory observations captured during this sync
@@ -406,6 +435,15 @@ class CoinFlipConsciousness:
                 "sensory_enabled": self.enable_sensory,
                 "audio_observation": audio_dict,
                 "vision_observation": vision_dict,
+                "memory_guidance": {
+                    "sample_count": self._last_memory_guidance.get("sample_count", 0),
+                    "success_count": self._last_memory_guidance.get("success_count", 0),
+                    "failure_count": self._last_memory_guidance.get("failure_count", 0),
+                    "preferred_pattern": self._last_memory_guidance.get(
+                        "preferred_pattern", ""
+                    ),
+                },
+                "consciousness_theory": CONSCIOUSNESS_THEORY,
                 # Full consciousness state vector saved for GUI replay
                 "consciousness_vector": [round(v, 8) for v in self.consciousness.vector],
             }
@@ -459,6 +497,23 @@ class CoinFlipConsciousness:
             if not correct:
                 self.consciousness.apply_error_feedback(0.6, learning_rate=0.05)
 
+            self.thought_engine.remember(
+                pred.get("consciousness_vector", self.consciousness.vector),
+                Thought(
+                    pattern=pattern,
+                    confidence=float(pred.get("thought_confidence", 0.5)),
+                    modality="prediction",
+                    origin="coin_flip_training",
+                ),
+                {
+                    "correct": correct,
+                    "reward": performance_delta,
+                    "actual": actual.lower().strip(),
+                    "predicted": pred["prediction"],
+                    "thought_confidence": pred.get("thought_confidence", 0.5),
+                },
+            )
+
             # Persist the full training record (every byte)
             record: Dict[str, Any] = {
                 "record_type": "training",
@@ -479,8 +534,10 @@ class CoinFlipConsciousness:
                 ),
                 "session_total_after": self._total,
                 "session_correct_after": self._correct,
+                "memory_samples_after": len(self.thought_engine.memory),
                 "system_snapshot_at_prediction": pred.get("system_snapshot"),
                 "trained_at_utc": _now_iso(),
+                "consciousness_theory": CONSCIOUSNESS_THEORY,
             }
 
             self._append_record(self.TRAINING_FILE, record)
@@ -600,6 +657,8 @@ class CoinFlipConsciousness:
             "session_dir": str(self.session_dir),
             "predictions_file": str(self.session_dir / self.PREDICTIONS_FILE),
             "training_file": str(self.session_dir / self.TRAINING_FILE),
+            "memory_samples": len(self.thought_engine.memory),
+            "consciousness_theory": CONSCIOUSNESS_THEORY,
         }
 
     def load_predictions(self) -> List[Dict[str, Any]]:

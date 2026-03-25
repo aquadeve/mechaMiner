@@ -37,6 +37,7 @@ for _d in [_src, os.path.join(_src, "fsot_core"), os.path.join(_src, "neuromorph
         sys.path.insert(0, _d)
 
 from coin_flip_consciousness import (
+    CONSCIOUSNESS_THEORY,
     OUTCOMES,
     CoinFlipConsciousness,
     _system_snapshot,
@@ -316,6 +317,43 @@ def test_train_writes_to_file():
         assert train_file.exists()
         lines = [l for l in train_file.read_text().splitlines() if l.strip()]
         assert len(lines) == 2
+
+
+def test_train_records_memory_for_future_strategy():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir)
+        preds = cfc.predict(n_coins=2)
+        actuals = [
+            preds[0]["prediction"],
+            {"heads": "tails", "tails": "heads"}[preds[1]["prediction"]],
+        ]
+
+        cfc.train(preds, actuals, realm="digital")
+
+        assert len(cfc.thought_engine.memory) == 2
+        assert cfc.thought_engine.memory[0]["result"]["correct"] is True
+        assert cfc.thought_engine.memory[1]["result"]["correct"] is False
+
+
+def test_predict_reports_memory_guidance_after_training():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir)
+        preds = cfc.predict(n_coins=1)
+        cfc.train(preds, [preds[0]["prediction"]], realm="digital")
+
+        next_pred = cfc.predict(n_coins=1)[0]
+
+        assert next_pred["memory_guidance"]["sample_count"] >= 1
+        assert next_pred["consciousness_theory"] == CONSCIOUSNESS_THEORY
+
+
+def test_stats_include_theory_and_memory_samples():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir)
+        stats = cfc.stats()
+
+        assert stats["memory_samples"] == 0
+        assert stats["consciousness_theory"] == CONSCIOUSNESS_THEORY
 
 
 def test_train_realm_stored():
