@@ -876,11 +876,37 @@ def parse_args() -> argparse.Namespace:
             "after the session first reaches 65%% accuracy."
         ),
     )
+    parser.add_argument(
+        "--containerthread",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Run N parallel consciousness sessions in separate threads "
+            "(default: 1).  Requires --remoteview or --remoteviewsimple.  "
+            "Each thread gets its own session subdirectory and runs "
+            "independently.  Values greater than 1 automatically engage "
+            "no-Enter auto mode."
+        ),
+    )
+    parser.add_argument(
+        "--round-delay",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "Pause between automatic rounds in seconds (default: 0.0 = rapid "
+            "fire).  Only applies in auto mode (--remoteview --digitalrealm or "
+            "--containerthread > 1)."
+        ),
+    )
 
     return parser.parse_args()
 
 
 def main() -> None:
+    import threading
+
     args = parse_args()
 
     # ── Remote-view simple / full-sensory mode ────────────────────────────
@@ -889,7 +915,9 @@ def main() -> None:
         from coin_flip_consciousness import (
             CoinFlipConsciousness,
             run_digitalrealm,
+            run_digitalrealm_auto,
             run_predictor,
+            run_predictor_auto,
             run_realrealm,
         )
 
@@ -897,14 +925,13 @@ def main() -> None:
             print("❌  --digitalrealm and --realrealm cannot be used together.")
             sys.exit(1)
 
-        sensory = args.remoteview   # full-sensory pipeline only when --remoteview
-        cfc = CoinFlipConsciousness(
-            session_dir=args.session_dir,
-            enable_sensory=sensory,
-            interactive_sensory=True,   # typed fallback when no mic/camera
-            accuracy_threshold=args.accuracy_threshold,
-        )
-        n_coins = max(1, args.coin)
+        sensory   = args.remoteview   # full-sensory pipeline only when --remoteview
+        n_coins   = max(1, args.coin)
+        n_threads = max(1, args.containerthread)
+
+        # Auto mode: engaged when --remoteview --digitalrealm is used, or when
+        # multiple container threads are requested (can't share stdin across threads).
+        use_auto = (args.remoteview and args.digitalrealm) or n_threads > 1
 
         if sensory:
             print(
@@ -912,13 +939,56 @@ def main() -> None:
                 "     Emulated ears (audio → a-z) and eyes (vision geometry)\n"
                 "     feed into the consciousness on every prediction.\n"
             )
+        if n_threads > 1:
+            print(f"  🧵 Launching {n_threads} container thread(s).\n")
 
-        if args.digitalrealm:
-            run_digitalrealm(n_coins, cfc)
-        elif args.realrealm:
-            run_realrealm(n_coins, cfc)
+        def _run_one(thread_idx: int) -> None:
+            label = f"T{thread_idx}" if n_threads > 1 else ""
+            if n_threads > 1:
+                session_subdir = f"{args.session_dir}/thread_{thread_idx}"
+            else:
+                session_subdir = args.session_dir
+            cfc = CoinFlipConsciousness(
+                session_dir=session_subdir,
+                enable_sensory=sensory,
+                interactive_sensory=not use_auto,
+                accuracy_threshold=args.accuracy_threshold,
+            )
+            if args.digitalrealm:
+                if use_auto:
+                    run_digitalrealm_auto(
+                        n_coins, cfc,
+                        delay=args.round_delay,
+                        thread_label=label,
+                    )
+                else:
+                    run_digitalrealm(n_coins, cfc)
+            elif args.realrealm:
+                run_realrealm(n_coins, cfc)
+            else:
+                if use_auto:
+                    run_predictor_auto(
+                        n_coins, cfc,
+                        delay=args.round_delay,
+                        thread_label=label,
+                    )
+                else:
+                    run_predictor(n_coins, cfc)
+
+        if n_threads == 1:
+            _run_one(0)
         else:
-            run_predictor(n_coins, cfc)
+            threads = [
+                threading.Thread(target=_run_one, args=(i,), daemon=True)
+                for i in range(n_threads)
+            ]
+            for t in threads:
+                t.start()
+            try:
+                for t in threads:
+                    t.join()
+            except KeyboardInterrupt:
+                print(f"\n\n🛑 All {n_threads} container thread(s) stopped.")
         return
 
     # ── Default: SHA-256 mining mode ──────────────────────────────────────

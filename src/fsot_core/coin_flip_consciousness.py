@@ -806,3 +806,187 @@ def _print_session_stats(cfc: CoinFlipConsciousness) -> None:
     print(f"     Data saved : {stats['session_dir']}")
     print(f"       └ predictions : {stats['predictions_file']}")
     print(f"       └ training    : {stats['training_file']}")
+
+
+# ---------------------------------------------------------------------------
+# Graphics helpers — lightweight ANSI terminal rendering (no extra deps)
+# ---------------------------------------------------------------------------
+
+def _ansi(code: str) -> str:
+    """Return an ANSI escape sequence when stdout is a tty, else empty string."""
+    return f"\033[{code}m" if sys.stdout.isatty() else ""
+
+
+def _bar(value: float, width: int = 30, fill: str = "█", empty: str = "░") -> str:
+    """Return an ASCII progress bar string for *value* in [0, 1]."""
+    clamped = max(0.0, min(1.0, value))
+    filled = int(round(clamped * width))
+    return fill * filled + empty * (width - filled)
+
+
+def _render_frame(
+    round_num: int,
+    training_records: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    thread_label: str = "",
+) -> None:
+    """
+    Print a single auto-mode display frame to stdout using ANSI colour codes
+    for a lightweight "graphics acceleration" effect without requiring any
+    additional dependencies.
+    """
+    reset   = _ansi("0")
+    bold    = _ansi("1")
+    cyan    = _ansi("96")
+    green   = _ansi("92")
+    red     = _ansi("91")
+    yellow  = _ansi("93")
+    magenta = _ansi("95")
+
+    accuracy = stats.get("accuracy", 0.0)
+    step     = stats.get("step", 0)
+    label    = f"[{thread_label}] " if thread_label else ""
+    bar_color = green if accuracy >= 0.55 else (yellow if accuracy >= 0.45 else red)
+
+    print(f"\n{bold}{cyan}{'─' * 60}{reset}")
+    print(
+        f"  {bold}{label}Round {round_num}{reset}"
+        f"  │  Predictions: {step}"
+        f"  │  Accuracy: {bar_color}{accuracy:.1%}{reset}"
+    )
+    print(f"  {bar_color}{_bar(accuracy)}{reset}  {accuracy:.1%}")
+
+    for rec in training_records:
+        symbol = f"{green}✅{reset}" if rec["correct"] else f"{red}❌{reset}"
+        pred_c = f"{cyan}{rec['predicted'].upper():5s}{reset}"
+        act_c  = f"{magenta}{rec['actual'].upper():5s}{reset}"
+        print(
+            f"  {symbol}  Coin {rec['coin_index']}  "
+            f"pred={pred_c}  actual={act_c}  "
+            f"acc={rec['session_accuracy_after']:.1%}"
+        )
+
+    print(f"  Session: {stats.get('session_dir', '')}")
+
+
+# ---------------------------------------------------------------------------
+# Automatic (no-Enter) run modes
+# ---------------------------------------------------------------------------
+
+def run_digitalrealm_auto(
+    n_coins: int,
+    cfc: "CoinFlipConsciousness",
+    delay: float = 0.0,
+    thread_label: str = "",
+) -> None:
+    """
+    Automatic Digital Realm training mode — runs continuously without requiring
+    any keyboard input.
+
+    The program generates secret coin-flip outcomes, the consciousness predicts,
+    outcomes are revealed immediately, and the consciousness is trained — all in
+    a rapid automatic loop.  An ANSI-colour terminal frame is rendered after
+    every round to provide visual feedback ("graphics acceleration").
+
+    Parameters
+    ----------
+    n_coins:
+        Number of coins to predict per round.
+    cfc:
+        A :class:`CoinFlipConsciousness` instance.
+    delay:
+        Optional pause between rounds in seconds (default ``0.0`` = as fast as
+        possible).
+    thread_label:
+        Short string shown in the display header to identify the session when
+        multiple sessions run in parallel via ``--containerthread``.
+    """
+    label = f"[{thread_label}] " if thread_label else ""
+    _banner(f"REMOTE VIEW  —  Auto Digital Realm  {label}".rstrip())
+    print("  Running automatically (no Enter needed).  Ctrl-C to stop.\n")
+
+    round_num = 0
+    try:
+        while True:
+            round_num += 1
+
+            # Secretly generate outcomes
+            secret_actuals = [random.choice(OUTCOMES) for _ in range(n_coins)]
+
+            # Consciousness predicts
+            predictions = cfc.predict(n_coins)
+
+            # Train immediately — no pause needed
+            training_records = cfc.train(predictions, secret_actuals, realm="digital")
+
+            # Render display frame
+            _render_frame(
+                round_num=round_num,
+                training_records=training_records,
+                stats=cfc.stats(),
+                thread_label=thread_label,
+            )
+
+            if delay > 0.0:
+                time.sleep(delay)
+
+    except KeyboardInterrupt:
+        print(f"\n\n  🛑 {label}Auto digital realm stopped.")
+        _print_session_stats(cfc)
+
+
+def run_predictor_auto(
+    n_coins: int,
+    cfc: "CoinFlipConsciousness",
+    delay: float = 0.0,
+    thread_label: str = "",
+) -> None:
+    """
+    Automatic predictor mode — runs continuously without requiring any keyboard
+    input.
+
+    Parameters
+    ----------
+    n_coins:
+        Number of coins to predict per round.
+    cfc:
+        A :class:`CoinFlipConsciousness` instance.
+    delay:
+        Optional pause between rounds in seconds (default ``0.0`` = rapid fire).
+    thread_label:
+        Short string shown in the display header when multiple sessions run in
+        parallel via ``--containerthread``.
+    """
+    reset = _ansi("0")
+    bold  = _ansi("1")
+    cyan  = _ansi("96")
+
+    label = f"[{thread_label}] " if thread_label else ""
+    _banner(f"REMOTE VIEW  —  Auto Predictor  {label}".rstrip())
+    print("  Running automatically (no Enter needed).  Ctrl-C to stop.\n")
+
+    round_num = 0
+    try:
+        while True:
+            round_num += 1
+            snapshot = _system_snapshot()
+            predictions = cfc.predict(n_coins)
+            stats = cfc.stats()
+
+            print(
+                f"\n  {bold}{cyan}── Round {round_num} ──{reset}"
+                f"  {snapshot['utc_iso']}"
+            )
+            for pred in predictions:
+                _print_prediction(pred)
+            print(
+                f"  Predictions: {stats['step']}  "
+                f"│  Session: {stats['session_dir']}"
+            )
+
+            if delay > 0.0:
+                time.sleep(delay)
+
+    except KeyboardInterrupt:
+        print(f"\n\n  🛑 {label}Auto predictor stopped.")
+        _print_session_stats(cfc)

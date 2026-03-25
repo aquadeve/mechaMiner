@@ -53,6 +53,10 @@ from sensory_bridge import (
 )
 from coin_flip_consciousness import (
     CoinFlipConsciousness,
+    _bar,
+    _render_frame,
+    run_digitalrealm_auto,
+    run_predictor_auto,
     _print_prediction,
 )
 from core_system import ConsciousnessState
@@ -766,6 +770,199 @@ def test_print_prediction_no_sensory_no_extra_lines(capsys):
     # No extra sensory lines
     assert "👂" not in out
     assert "👁" not in out
+
+
+# ===========================================================================
+# _bar — ASCII progress bar helper
+# ===========================================================================
+
+def test_bar_empty():
+    assert _bar(0.0, width=10) == "░" * 10
+
+
+def test_bar_full():
+    assert _bar(1.0, width=10) == "█" * 10
+
+
+def test_bar_half():
+    result = _bar(0.5, width=10)
+    assert result.count("█") == 5
+    assert result.count("░") == 5
+
+
+def test_bar_clamps_above_one():
+    assert _bar(2.0, width=8) == "█" * 8
+
+
+def test_bar_clamps_below_zero():
+    assert _bar(-0.5, width=8) == "░" * 8
+
+
+# ===========================================================================
+# _render_frame — ANSI terminal display
+# ===========================================================================
+
+def test_render_frame_prints_round_number(capsys):
+    training_records = [
+        {
+            "coin_index": 1,
+            "predicted": "heads",
+            "actual": "tails",
+            "correct": False,
+            "session_accuracy_after": 0.0,
+        }
+    ]
+    stats = {
+        "accuracy": 0.0,
+        "step": 1,
+        "session_dir": "/tmp/test_session",
+    }
+    _render_frame(round_num=42, training_records=training_records, stats=stats)
+    out = capsys.readouterr().out
+    assert "42" in out
+
+
+def test_render_frame_shows_accuracy(capsys):
+    training_records = [
+        {
+            "coin_index": 1,
+            "predicted": "heads",
+            "actual": "heads",
+            "correct": True,
+            "session_accuracy_after": 1.0,
+        }
+    ]
+    stats = {
+        "accuracy": 1.0,
+        "step": 1,
+        "session_dir": "/tmp/s",
+    }
+    _render_frame(round_num=1, training_records=training_records, stats=stats)
+    out = capsys.readouterr().out
+    assert "100.0%" in out
+
+
+def test_render_frame_shows_thread_label(capsys):
+    stats = {"accuracy": 0.5, "step": 1, "session_dir": "/tmp/s"}
+    _render_frame(round_num=1, training_records=[], stats=stats, thread_label="T3")
+    out = capsys.readouterr().out
+    assert "T3" in out
+
+
+# ===========================================================================
+# run_digitalrealm_auto — automatic Digital Realm loop
+# ===========================================================================
+
+def test_run_digitalrealm_auto_runs_rounds(capsys):
+    """run_digitalrealm_auto should complete N rounds before KeyboardInterrupt."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir, enable_sensory=False)
+
+        call_count = 0
+
+        original_train = cfc.train
+
+        def _counting_train(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 3:
+                raise KeyboardInterrupt
+            return original_train(*args, **kwargs)
+
+        cfc.train = _counting_train
+        run_digitalrealm_auto(n_coins=1, cfc=cfc, delay=0.0)
+
+    assert call_count >= 3
+
+
+def test_run_digitalrealm_auto_persists_training(capsys):
+    """run_digitalrealm_auto should write training records to disk."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir, enable_sensory=False)
+
+        rounds_done = [0]
+        original_train = cfc.train
+
+        def _limited_train(*args, **kwargs):
+            result = original_train(*args, **kwargs)
+            rounds_done[0] += 1
+            if rounds_done[0] >= 5:
+                raise KeyboardInterrupt
+            return result
+
+        cfc.train = _limited_train
+        run_digitalrealm_auto(n_coins=1, cfc=cfc, delay=0.0)
+
+    assert cfc.stats()["total_trained"] >= 5
+
+
+def test_run_digitalrealm_auto_thread_label_in_output(capsys):
+    """Thread label should appear in the output."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir, enable_sensory=False)
+
+        call_count = [0]
+        original_train = cfc.train
+
+        def _stop_after_one(*args, **kwargs):
+            result = original_train(*args, **kwargs)
+            call_count[0] += 1
+            if call_count[0] >= 1:
+                raise KeyboardInterrupt
+            return result
+
+        cfc.train = _stop_after_one
+        run_digitalrealm_auto(n_coins=1, cfc=cfc, delay=0.0, thread_label="T7")
+
+    out = capsys.readouterr().out
+    assert "T7" in out
+
+
+# ===========================================================================
+# run_predictor_auto — automatic predictor loop
+# ===========================================================================
+
+def test_run_predictor_auto_runs_rounds(capsys):
+    """run_predictor_auto should emit predictions without waiting for input."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir, enable_sensory=False)
+
+        predict_count = [0]
+        original_predict = cfc.predict
+
+        def _counting_predict(*args, **kwargs):
+            result = original_predict(*args, **kwargs)
+            predict_count[0] += 1
+            if predict_count[0] >= 3:
+                raise KeyboardInterrupt
+            return result
+
+        cfc.predict = _counting_predict
+        run_predictor_auto(n_coins=1, cfc=cfc, delay=0.0)
+
+    assert predict_count[0] >= 3
+
+
+def test_run_predictor_auto_thread_label_in_output(capsys):
+    """Thread label should appear in auto predictor output."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfc = _make_cfc(tmpdir, enable_sensory=False)
+
+        original_predict = cfc.predict
+        count = [0]
+
+        def _stop(*args, **kwargs):
+            result = original_predict(*args, **kwargs)
+            count[0] += 1
+            if count[0] >= 1:
+                raise KeyboardInterrupt
+            return result
+
+        cfc.predict = _stop
+        run_predictor_auto(n_coins=1, cfc=cfc, delay=0.0, thread_label="T2")
+
+    out = capsys.readouterr().out
+    assert "T2" in out
 
 
 # ===========================================================================
